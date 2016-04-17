@@ -1,5 +1,5 @@
 create or replace package mailgun_pkg is
-/* mailgun API
+/* mailgun API v0.2
   by Jeffrey Kemp
   
   Refer to https://github.com/jeffreykemp/mailgun-plsql-api for detailed
@@ -36,6 +36,8 @@ create or replace package mailgun_pkg is
 
 */
 
+-- Substitution Strings supported by Mailgun
+
 -- include this in your email to allow the recipient to unsubscribe from all
 -- emails from your server
 unsubscribe_link_all constant varchar2(100) := '%unsubscribe_url%';
@@ -44,11 +46,32 @@ unsubscribe_link_all constant varchar2(100) := '%unsubscribe_url%';
 -- allow the recipient to unsubscribe from emails from your server with that tag
 unsubscribe_link_tag constant varchar2(100) := '%tag_unsubscribe_url%';
 
+-- include these in your email to substitute details about the recipient in the
+-- subject line or message body
+recipient_name       constant varchar2(100) := '%recipient.name%';
+recipient_first_name constant varchar2(100) := '%recipient.first_name%';
+recipient_last_name  constant varchar2(100) := '%recipient.last_name%';
+recipient_id         constant varchar2(100) := '%recipient.id%';
+
+-- init: set up mailgun parameters
+-- (Note: you can set these directly by editing the package body if you want)
+--   p_public_api_key:  your mailgun public API key
+--   p_private_api_key: your mailgun private API key
+--   p_my_domain:       your mailgun domain
+--   p_api_url:         your mailgun API url (not including your domain)
+-- Pass NULL to any parameter to leave it unchanged.
+procedure init
+  (p_public_api_key  in varchar2 := null
+  ,p_private_api_key in varchar2 := null
+  ,p_my_domain       in varchar2 := null
+  ,p_api_url         in varchar2 := null
+  );
+
 -- validate_email: validate an email address (procedure version)
---   address:    email address to validate
---   is_valid:   true if the email address appears to be valid
---   suggestion: suggested correction for email address (may or may not be
---               set regardless of whether is_valid is true or false)
+--   p_address:    email address to validate
+--   p_is_valid:   true if the email address appears to be valid
+--   p_suggestion: suggested correction for email address (may or may not be
+--                 set regardless of whether is_valid is true or false)
 procedure validate_email
   (p_address    in varchar2
   ,p_is_valid   out boolean
@@ -68,12 +91,43 @@ procedure send_email
   ,p_from_email   in varchar2
   ,p_reply_to     in varchar2 := null
   ,p_to_name      in varchar2 := null
-  ,p_to_email     in varchar2
+  ,p_to_email     in varchar2 := null -- optional if the send_xx have been called already
   ,p_cc           in varchar2 := null
   ,p_bcc          in varchar2 := null
   ,p_subject      in varchar2
   ,p_message      in clob /*html allowed*/
   ,p_tag          in varchar2 := null
+  );
+
+-- call these BEFORE send_email to add multiple recipients
+-- p_email:      (required) email address
+-- p_name:       (optional) person's full name
+-- p_first_name: (optional) person's first/given name
+-- p_last_name:  (optional) person's last/surname
+-- p_id:         (optional) unique id for the recipient
+-- p_send_by:    (optional) use this parameter if you want, instead of calling
+--               the different send_xx procedures
+procedure send_to
+  (p_email      in varchar2
+  ,p_name       in varchar2 := null
+  ,p_first_name in varchar2 := null
+  ,p_last_name  in varchar2 := null
+  ,p_id         in varchar2 := null
+  ,p_send_by    in varchar2 := 'to' -- must be to/cc/bcc
+  );
+procedure send_cc
+  (p_email      in varchar2
+  ,p_name       in varchar2 := null
+  ,p_first_name in varchar2 := null
+  ,p_last_name  in varchar2 := null
+  ,p_id         in varchar2 := null
+  );
+procedure send_bcc
+  (p_email      in varchar2
+  ,p_name       in varchar2 := null
+  ,p_first_name in varchar2 := null
+  ,p_last_name  in varchar2 := null
+  ,p_id         in varchar2 := null
   );
 
 -- call these BEFORE send_email to add an attachment or inline image

@@ -1,27 +1,50 @@
 create or replace package body mailgun_pkg is
+/* mailgun API v0.2
+  by Jeffrey Kemp
+
+  Refer to https://github.com/jeffreykemp/mailgun-plsql-api for detailed
+  installation instructions and API reference.
+*/
 
 -- Enter your mailgun public key here
-MAILGUN_PUBLIC_API_KEY constant varchar2(200) := '';
+g_public_api_key varchar2(200) := '';
 
 -- Enter your mailgun secret key here
-MAILGUN_PRIVATE_API_KEY constant varchar2(200) := '';
+g_private_api_key varchar2(200) := '';
 
 -- Enter your domain registered with mailgun here
-MAILGUN_MY_DOMAIN constant varchar2(200) := '';
+g_my_domain varchar2(200) := '';
 
 -- API Base URL (not including your domain)
-MAILGUN_API_URL constant varchar2(200) := 'https://api.mailgun.net/v3/';
+g_api_url varchar2(200) := 'https://api.mailgun.net/v3/';
 
 crlf constant varchar2(50) := chr(13) || chr(10);
 boundary constant varchar2(30) := '-----v4np6rnptyb566a0y704sjeqv';
+max_recipients constant integer := 1000; -- mailgun limitation for recipient variables
 
 type t_v2arr is table of varchar2(32767) index by binary_integer;
+
+type t_recipient is record
+  (send_by    varchar2(3)    --to/cc/bcc
+  ,email_spec varchar2(1000) -- name <email>
+   -- mailgun recipient variables:
+  ,email      varchar2(512) -- %recipient.email%
+  ,name       varchar2(200) -- %recipient.name%
+  ,first_name varchar2(200) -- %recipient.first_name%
+  ,last_name  varchar2(200) -- %recipient.last_name%
+  ,id         varchar2(200) -- %recipient.id%
+  );
+
 type t_attachment is record
   (blob_content blob
   ,clob_content clob
   ,header       varchar2(4000)
   );
+
+type t_rcpt is table of t_recipient index by binary_integer;
 type t_arr is table of t_attachment index by binary_integer;
+
+g_recipient t_rcpt;
 g_attachment t_arr;
 
 procedure msg (p_msg in varchar2) is
@@ -29,6 +52,29 @@ begin
   apex_debug_message.log_message($$PLSQL_UNIT || ': ' || p_msg);
   dbms_output.put_line(p_msg);
 end msg;
+
+procedure assert (cond in boolean, err in varchar2) is
+begin
+  if not cond then
+    raise_application_error(-20000, $$PLSQL_UNIT || ' assertion failed: ' || err);
+  end if;
+end assert;
+
+procedure init
+  (p_public_api_key  in varchar2 := null
+  ,p_private_api_key in varchar2 := null
+  ,p_my_domain       in varchar2 := null
+  ,p_api_url         in varchar2 := null
+  ) is
+begin
+  msg('init');
+  
+  g_public_api_key  := nvl(p_public_api_key, g_public_api_key);
+  g_private_api_key := nvl(p_private_api_key, g_private_api_key);
+  g_my_domain       := nvl(p_my_domain, g_my_domain);
+  g_api_url         := nvl(p_api_url, g_api_url);
+
+end init;
 
 function get_json
   (p_url    in varchar2
@@ -44,6 +90,8 @@ function get_json
   buf   varchar2(32767);
 begin
   msg('get_json ' || p_url);
+  
+  assert(p_url is not null, 'get_json: p_url cannot be null');
   
   if p_params is not null then
     url := url || '?' || p_params;
@@ -89,15 +137,14 @@ procedure validate_email
 begin
   msg('validate_email ' || p_address);
   
-  if MAILGUN_PUBLIC_API_KEY is null then
-    raise_application_error(-20000, 'validate_email: you must first edit '||$$PLSQL_UNIT||' to set MAILGUN_PUBLIC_API_KEY');
-  end if;
+  assert(g_public_api_key is not null, 'validate_email: your mailgun public API key not set');
+  assert(p_address is not null, 'validate_email: p_address cannot be null');
   
   str := get_json
-    (p_url    => MAILGUN_API_URL || 'address/validate'
+    (p_url    => g_api_url || 'address/validate'
     ,p_params => 'address=' || apex_util.url_encode(p_address)
     ,p_user   => 'api'
-    ,p_pwd    => MAILGUN_PUBLIC_API_KEY);
+    ,p_pwd    => g_public_api_key);
   
   apex_json.parse(str);
 
@@ -129,6 +176,7 @@ end email_is_valid;
 
 function field_header (tag in varchar2) return varchar2 is
 begin
+  assert(tag is not null, 'field_header: tag cannot be null');
   return '--' || boundary || crlf
     || 'Content-Disposition: form-data; name="' || tag || '"' || crlf
     || crlf;
@@ -153,6 +201,7 @@ procedure write_clob
   filepos      pls_integer         := 1;
   counter      pls_integer         := 1;
 begin
+  assert(file_content is not null, 'write_clob: file_content cannot be null');
   file_len := dbms_lob.getlength (file_content);
   msg('write_clob ' || file_len || ' bytes');
   modulo := mod (file_len, amt);
@@ -183,6 +232,7 @@ procedure write_blob
   filepos      pls_integer         := 1;
   counter      pls_integer         := 1;
 begin
+  assert(file_content is not null, 'write_blob: file_content cannot be null');
   file_len := dbms_lob.getlength (file_content);
   msg('write_blob ' || file_len || ' bytes');
   modulo := mod (file_len, amt);
@@ -204,18 +254,19 @@ procedure send_email
   ,p_from_email   in varchar2
   ,p_reply_to     in varchar2 := null
   ,p_to_name      in varchar2 := null
-  ,p_to_email     in varchar2
+  ,p_to_email     in varchar2 := null
   ,p_cc           in varchar2 := null
   ,p_bcc          in varchar2 := null
   ,p_subject      in varchar2
   ,p_message      in clob
   ,p_tag          in varchar2 := null
   ) is
-  url            varchar2(32767) := MAILGUN_API_URL || MAILGUN_MY_DOMAIN
-                                 || '/messages';
-  header         varchar2(32767);
+  url            varchar2(32767) := g_api_url || g_my_domain || '/messages';
+  header         clob;
   sender         varchar2(4000);
-  recipients     varchar2(32767);
+  recipients_to  varchar2(32767);
+  recipients_cc  varchar2(32767);
+  recipients_bcc varchar2(32767);
   footer         varchar2(100);
   content_length integer;
   req            utl_http.req;
@@ -226,38 +277,92 @@ procedure send_email
   name           varchar2(256);
   value          varchar2(256);
   buf            varchar2(32767);
+
+  procedure append_recipient (rcpt_list in out varchar2, r in t_recipient) is
+  begin
+    
+    if rcpt_list is not null then
+      rcpt_list := rcpt_list || ', ';
+    end if;
+    rcpt_list := rcpt_list || r.email_spec;
+    
+    apex_json.open_object(r.email);
+    apex_json.write('email', r.email);
+    apex_json.write('name', r.name);
+    apex_json.write('first_name', r.first_name);
+    apex_json.write('last_name', r.last_name);
+    apex_json.write('id', r.id);
+    apex_json.close_object;
+
+  end append_recipient;
+
 begin
   msg('send_email ' || p_to_email || ' "' || p_subject || '"');
 
-  if MAILGUN_PRIVATE_API_KEY is null then
-    raise_application_error(-20000, 'validate_email: you must first edit '||$$PLSQL_UNIT||' to set MAILGUN_PRIVATE_API_KEY');
-  end if;
+  assert(g_private_api_key is not null, 'send_email: your mailgun private API key not set');
+  assert(g_my_domain is not null, 'send_email: your mailgun domain not set');
+  assert(p_from_email is not null, 'send_email: p_from_email cannot be null');
   
-  if p_from_name is null and p_from_email like '% <%>%' then
+  if p_from_email like '% <%>%' then
     sender := p_from_email;
   else
     sender := nvl(p_from_name,p_from_email) || ' <'||p_from_email||'>';
   end if;
-  
-  if p_to_name is null and p_to_email like '% <%>%' then
-    recipients := p_to_email;
-  else
-    recipients := nvl(p_to_name,p_to_email) || ' <'||p_to_email||'>';
+
+  if p_to_email is not null then
+    send_to
+      (p_email => p_to_email
+      ,p_name  => p_to_name);
+  end if;
+
+  if p_cc is not null then
+    send_cc(p_cc);
+  end if;
+
+  if p_bcc is not null then
+    send_bcc(p_bcc);
   end if;
   
+  apex_json.initialize_clob_output;
+  apex_json.open_object;
+
+  if g_recipient.count > 0 then
+    for i in 1..g_recipient.count loop
+      case g_recipient(i).send_by
+      when 'to'  then append_recipient(recipients_to, g_recipient(i));
+      when 'cc'  then append_recipient(recipients_cc, g_recipient(i));
+      when 'bcc' then append_recipient(recipients_bcc, g_recipient(i));
+      end case;
+    end loop;
+  end if;
+  
+  assert(recipients_to is not null, 'send_email: recipients list cannot be empty');
+  
+  apex_json.close_object;
+  dbms_lob.createtemporary(header, false, dbms_lob.call);
+
   header := crlf
     || form_field('from', sender)
-    || form_field('to', recipients)
-    || form_field('cc', p_cc)
-    || form_field('bcc', p_bcc)
     || form_field('h:Reply-To', p_reply_to)
+    || form_field('to', recipients_to)
+    || form_field('cc', recipients_cc)
+    || form_field('bcc', recipients_bcc)
     || form_field('o:tag', p_tag)
     || form_field('subject', p_subject)
-    || field_header('html');
+    || field_header('recipient-variables');
+  
+  dbms_lob.append(header, apex_json.get_clob_output);
+
+  buf := crlf || field_header('html');
+  dbms_lob.writeappend(header, length(buf), buf);
+
+  dbms_lob.append(header, p_message);
+
+  dbms_lob.writeappend(header, length(crlf), crlf);
+
   footer := '--' || boundary || '--';
   
-  content_length := length(header)
-                  + dbms_lob.getlength(p_message) + length(crlf)
+  content_length := dbms_lob.getlength(header)
                   + length(footer);
 
   if g_attachment.count > 0 then
@@ -285,7 +390,7 @@ begin
   
   req := utl_http.begin_request(url, method=>'POST');
   
-  utl_http.set_authentication(req, 'api', MAILGUN_PRIVATE_API_KEY); -- Use HTTP Basic Authen. Scheme
+  utl_http.set_authentication(req, 'api', g_private_api_key); -- Use HTTP Basic Authen. Scheme
   
   utl_http.set_header(req, 'Content-Type', 'multipart/form-data; boundary="' || boundary || '"');
   utl_http.set_header(req, 'Content-Length', content_length);
@@ -293,11 +398,7 @@ begin
   msg('writing message contents...');
   
   msg(header);
-  utl_http.write_text(req, header);
-
-  write_clob(req, p_message);
-
-  utl_http.write_text(req, crlf);
+  write_clob(req, header);
 
   if g_attachment.count > 0 then
     for i in 1..g_attachment.count loop
@@ -357,15 +458,108 @@ begin
   utl_http.end_response (resp);
   
   reset;
+  apex_json.free_output;
+  dbms_lob.freetemporary(header);
   
   msg('send_email finished');
 exception
   when others then
     msg(SQLERRM);
     reset;
+    apex_json.free_output;
+    if header is not null then
+      dbms_lob.freetemporary(header);
+    end if;
     if resp_started then utl_http.end_response (resp); end if;
     raise;
 end send_email;
+
+procedure add_recipient
+  (p_email      in varchar2
+  ,p_name       in varchar2
+  ,p_first_name in varchar2
+  ,p_last_name  in varchar2
+  ,p_id         in varchar2
+  ,p_send_by    in varchar2
+  ) is
+  r t_recipient;
+begin
+  msg('add_recipient ' || p_send_by || ': ' || p_name || ' <' || p_email || '> #' || p_id);
+  
+  assert(g_recipient.count < max_recipients, 'maximum recipients per email exceeded (' || max_recipients || ')');
+  
+  assert(p_email is not null, 'add_recipient: p_email cannot be null');
+  assert(p_send_by is not null, 'add_recipient: p_send_by cannot be null');
+  assert(p_send_by in ('to','cc','bcc'), 'p_send_by must be to/cc/bcc');
+
+  r.send_by    := p_send_by;
+  r.name       := nvl(p_name, trim(p_first_name || ' ' || p_last_name));
+  r.first_name := p_first_name;
+  r.last_name  := p_last_name;
+  r.id         := p_id;
+  if p_email like '% <%>' then
+    r.email_spec := p_email;
+    r.email      := rtrim(ltrim(regexp_substr(p_email, '<.*>', 1, 1), '<'), '>');
+  else
+    r.email_spec := nvl(r.name, p_email) || ' <' || p_email || '>';
+    r.email      := p_email;
+  end if;
+
+  g_recipient(nvl(g_recipient.last,0)+1) := r;
+
+end add_recipient;
+
+procedure send_to
+  (p_email      in varchar2
+  ,p_name       in varchar2 := null
+  ,p_first_name in varchar2 := null
+  ,p_last_name  in varchar2 := null
+  ,p_id         in varchar2 := null
+  ,p_send_by    in varchar2 := 'to'
+  ) is
+begin
+  add_recipient
+    (p_email      => p_email
+    ,p_name       => p_name
+    ,p_first_name => p_first_name
+    ,p_last_name  => p_last_name
+    ,p_id         => p_id
+    ,p_send_by    => p_send_by);
+end send_to;
+
+procedure send_cc
+  (p_email      in varchar2
+  ,p_name       in varchar2 := null
+  ,p_first_name in varchar2 := null
+  ,p_last_name  in varchar2 := null
+  ,p_id         in varchar2 := null
+  ) is
+begin
+  add_recipient
+    (p_email      => p_email
+    ,p_name       => p_name
+    ,p_first_name => p_first_name
+    ,p_last_name  => p_last_name
+    ,p_id         => p_id
+    ,p_send_by    => 'cc');
+end send_cc;
+
+procedure send_bcc
+  (p_email      in varchar2
+  ,p_name       in varchar2 := null
+  ,p_first_name in varchar2 := null
+  ,p_last_name  in varchar2 := null
+  ,p_id         in varchar2 := null
+  ) is
+begin
+  add_recipient
+    (p_email      => p_email
+    ,p_name       => p_name
+    ,p_first_name => p_first_name
+    ,p_last_name  => p_last_name
+    ,p_id         => p_id
+    ,p_send_by    => 'bcc');
+end send_bcc;
 
 function attachment_header
   (p_file_name    in varchar2
@@ -374,11 +568,8 @@ function attachment_header
   ) return varchar2 is
 begin
 
-  if p_file_name is null then
-    raise_application_error(-20000, 'p_file_name cannot be null');
-  elsif p_content_type is null then
-    raise_application_error(-20000, 'p_content_type cannot be null');
-  end if;
+  assert(p_file_name is not null, 'attachment_header: p_file_name cannot be null');
+  assert(p_content_type is not null, 'attachment_header: p_content_type cannot be null');
 
   return '--' || boundary || crlf
     || 'Content-Disposition: form-data; name="'
@@ -399,6 +590,8 @@ procedure attach
 begin
   msg('attach');
   
+  assert(p_file_content is not null, 'attach(blob): p_file_content cannot be null');
+  
   attachment.header := attachment_header
     (p_file_name    => p_file_name
     ,p_content_type => p_content_type
@@ -418,6 +611,8 @@ procedure attach
   attachment t_attachment;
 begin
   msg('attach');
+
+  assert(p_file_content is not null, 'attach(clob): p_file_content cannot be null');
   
   attachment.header := attachment_header
     (p_file_name    => p_file_name
@@ -433,6 +628,7 @@ procedure reset is
 begin
   msg('reset');
   
+  g_recipient.delete;
   g_attachment.delete;
 
 end reset;
