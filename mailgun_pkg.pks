@@ -1,6 +1,9 @@
 create or replace package mailgun_pkg is
 /* mailgun API
   by Jeffrey Kemp
+  
+  Refer to https://github.com/jeffreykemp/mailgun-plsql-api for detailed
+  installation instructions and API reference.
 
   Includes:
   
@@ -15,6 +18,10 @@ create or replace package mailgun_pkg is
 
   PREREQUISITES
   
+  * Oracle Database 11gR2
+  
+  * Oracle Application Express 5.0 (just for the apex packages)
+  
   * Grants to Oracle / Apex packages:
   
     grant execute on apex_util to myschema;
@@ -24,34 +31,8 @@ create or replace package mailgun_pkg is
     grant execute on dbms_output to myschema;
   
   * Mailgun account - sign up here: https://mailgun.com/signup
-  
-  INSTALLATION
-  
-  1. Create Network ACL for https://api.mailgun.net
-  2. Add the mailgun https certificate to your Oracle wallet
-  
-  OR
-  
-  1. Set up a reverse proxy on your server to https://api.mailgun.net
-  2. Create Network ACL for http://yourserver
-  3. Edit the MAILGUN_API_URL value in the package body
-  
-  NETWORK ACL example
-  
-  begin
-    dbms_network_acl_admin.create_acl (
-      acl          => 'mailgun.xml', 
-      description  => 'Mailgun API',
-      principal    => 'yourschema', -- put your schema here
-      is_grant     => true, 
-      privilege    => 'connect');
-    dbms_network_acl_admin.assign_acl (
-      acl         => 'mailgun.xml',
-      host        => 'api.mailgun.net', 
-      lower_port  => 443);
-    commit;
-  end;
-  /
+
+  * Your server must be able to connect via https to api.mailgun.net
 
 */
 
@@ -109,6 +90,7 @@ procedure attach
   (p_file_content in clob
   ,p_file_name    in varchar2
   ,p_content_type in varchar2
+  ,p_inline       in boolean := false
   );
   
 -- call this to clear any attachments (note: send_email does this for you)

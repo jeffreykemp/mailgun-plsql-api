@@ -214,6 +214,8 @@ procedure send_email
   url            varchar2(32767) := MAILGUN_API_URL || MAILGUN_MY_DOMAIN
                                  || '/messages';
   header         varchar2(32767);
+  sender         varchar2(4000);
+  recipients     varchar2(32767);
   footer         varchar2(100);
   content_length integer;
   req            utl_http.req;
@@ -231,9 +233,21 @@ begin
     raise_application_error(-20000, 'validate_email: you must first edit '||$$PLSQL_UNIT||' to set MAILGUN_PRIVATE_API_KEY');
   end if;
   
+  if p_from_name is null and p_from_email like '% <%>%' then
+    sender := p_from_email;
+  else
+    sender := nvl(p_from_name,p_from_email) || ' <'||p_from_email||'>';
+  end if;
+  
+  if p_to_name is null and p_to_email like '% <%>%' then
+    recipients := p_to_email;
+  else
+    recipients := nvl(p_to_name,p_to_email) || ' <'||p_to_email||'>';
+  end if;
+  
   header := crlf
-    || form_field('from', nvl(p_from_name,p_from_email) || ' <'||p_from_email||'>')
-    || form_field('to', nvl(p_to_name,p_to_email) || ' <'||p_to_email||'>')
+    || form_field('from', sender)
+    || form_field('to', recipients)
     || form_field('cc', p_cc)
     || form_field('bcc', p_bcc)
     || form_field('h:Reply-To', p_reply_to)
@@ -353,6 +367,28 @@ exception
     raise;
 end send_email;
 
+function attachment_header
+  (p_file_name    in varchar2
+  ,p_content_type in varchar2
+  ,p_inline       in boolean
+  ) return varchar2 is
+begin
+
+  if p_file_name is null then
+    raise_application_error(-20000, 'p_file_name cannot be null');
+  elsif p_content_type is null then
+    raise_application_error(-20000, 'p_content_type cannot be null');
+  end if;
+
+  return '--' || boundary || crlf
+    || 'Content-Disposition: form-data; name="'
+    || case when p_inline then 'inline' else 'attachment' end
+    || '"; filename="' || p_file_name || '"' || crlf
+    || 'Content-Type: ' || p_content_type || crlf
+    || crlf;
+
+end attachment_header;
+
 procedure attach
   (p_file_content in blob
   ,p_file_name    in varchar2
@@ -363,12 +399,10 @@ procedure attach
 begin
   msg('attach');
   
-  attachment.header := '--' || boundary || crlf
-    || 'Content-Disposition: form-data; name="'
-    || case when p_inline then 'inline' else 'attachment' end
-    || '"; filename="' || p_file_name || '"' || crlf
-    || 'Content-Type: ' || p_content_type || crlf
-    || crlf;
+  attachment.header := attachment_header
+    (p_file_name    => p_file_name
+    ,p_content_type => p_content_type
+    ,p_inline       => p_inline);
   attachment.blob_content := p_file_content;  
   
   g_attachment(nvl(g_attachment.last,0)+1) := attachment;
@@ -379,16 +413,16 @@ procedure attach
   (p_file_content in clob
   ,p_file_name    in varchar2
   ,p_content_type in varchar2
+  ,p_inline       in boolean := false
   ) is
   attachment t_attachment;
 begin
   msg('attach');
   
-  attachment.header := '--' || boundary || crlf
-    || 'Content-Disposition: form-data; name="attachment"; '
-    || 'filename="' || p_file_name || '"' || crlf
-    || 'Content-Type: ' || p_content_type || crlf
-    || crlf;
+  attachment.header := attachment_header
+    (p_file_name    => p_file_name
+    ,p_content_type => p_content_type
+    ,p_inline       => p_inline);
   attachment.clob_content := p_file_content;
   
   g_attachment(nvl(g_attachment.last,0)+1) := attachment;
