@@ -102,6 +102,10 @@ begin
                   || '<br>'
                   || 'Reference: ' || mailgun_pkg.recipient_id
     );
+exception
+  when others then
+    mailgun_pkg.reset; -- clear any recipients from memory
+    raise;
 end;
 /
 
@@ -110,29 +114,36 @@ declare
   clob_content clob;
   blob_content blob;
 begin
+
   -- generate a largish text file
   dbms_lob.createtemporary(clob_content,false);
   clob_content := lpad('x', 32767, 'x');
   dbms_lob.writeappend(clob_content, 32767, lpad('y',32767,'y'));
   dbms_lob.writeappend(clob_content, 3, 'EOF');
   dbms_output.put_line('file size=' || dbms_lob.getlength(clob_content));
+
   -- load a binary file
+  -- source: https://github.com/mortenbra/alexandria-plsql-utils/blob/master/ora/file_util_pkg.pkb
   blob_content := alex.file_util_pkg.get_blob_from_file
     (p_directory_name => 'MY_DIRECTORY'
     ,p_file_name      => 'myimage.jpg');
+
   mailgun_pkg.attach
     (p_file_content => 'this is my file contents'
     ,p_file_name    => 'myfilesmall.txt'
     ,p_content_type => 'text/plain');
+
   mailgun_pkg.attach
     (p_file_content => clob_content
     ,p_file_name    => 'myfilelarge.txt'
     ,p_content_type => 'text/plain');
+
   mailgun_pkg.attach
     (p_file_content => blob_content
     ,p_file_name    => 'myimage.jpg'
     ,p_content_type => 'image/jpg'
     ,p_inline       => true);
+
   mailgun_pkg.send_email
     (p_from_email => 'Mr Sender <sender@host.com>'
     ,p_to_email   => 'Mrs Recipient <recipient@example.com>'
@@ -144,6 +155,7 @@ begin
                   || '<img src="cid:myimage.jpg">'
                   || '</body></html>'
     );
+
 exception
   when others then
     mailgun_pkg.reset; -- clear any attachments from memory
