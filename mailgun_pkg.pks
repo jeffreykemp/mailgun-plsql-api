@@ -1,5 +1,5 @@
 create or replace package mailgun_pkg is
-/* mailgun API v0.2
+/* mailgun API v0.3
   by Jeffrey Kemp
   
   Refer to https://github.com/jeffreykemp/mailgun-plsql-api for detailed
@@ -12,7 +12,8 @@ create or replace package mailgun_pkg is
   For an Apex plugin, download from here:
   https://github.com/jeffreykemp/jk64-plugin-mailgunemailvalidator
   
-  * API call to send an email
+  * API call to send an email; multiple attachments supported.
+  
   NOTE: another alternative (one that also works with Apex's builtin emails
         is to use the mailgun SMTP interface instead.
 
@@ -27,7 +28,7 @@ create or replace package mailgun_pkg is
     grant execute on apex_util to myschema;
     grant execute on apex_json to myschema;
     grant execute on utl_http to myschema;
-    grant execute on apex_debug_message to myschema;
+    grant execute on apex_debug to myschema;
     grant execute on dbms_output to myschema;
   
   * Mailgun account - sign up here: https://mailgun.com/signup
@@ -48,6 +49,7 @@ unsubscribe_link_tag constant varchar2(100) := '%tag_unsubscribe_url%';
 
 -- include these in your email to substitute details about the recipient in the
 -- subject line or message body
+recipient_email      constant varchar2(100) := '%recipient.email%';
 recipient_name       constant varchar2(100) := '%recipient.name%';
 recipient_first_name constant varchar2(100) := '%recipient.first_name%';
 recipient_last_name  constant varchar2(100) := '%recipient.last_name%';
@@ -59,12 +61,16 @@ recipient_id         constant varchar2(100) := '%recipient.id%';
 --   p_private_api_key: your mailgun private API key
 --   p_my_domain:       your mailgun domain
 --   p_api_url:         your mailgun API url (not including your domain)
+--   p_wallet_path:     your wallet path (required if using default https api)
+--   p_wallet_password: your wallet password (required if using default https api)
 -- Pass NULL to any parameter to leave it unchanged.
 procedure init
   (p_public_api_key  in varchar2 := null
   ,p_private_api_key in varchar2 := null
   ,p_my_domain       in varchar2 := null
   ,p_api_url         in varchar2 := null
+  ,p_wallet_path     in varchar2 := null
+  ,p_wallet_password in varchar2 := null
   );
 
 -- validate_email: validate an email address (procedure version)
@@ -146,10 +152,17 @@ procedure attach
   ,p_content_type in varchar2
   ,p_inline       in boolean := false
   );
-  
+
+-- returns the response text from the mailgun server for the most recent
+-- successful call (expected to be in json format)
+function last_response return varchar2;
+
 -- call this to clear any attachments (note: send_email does this for you)
 -- (e.g. if your proc raises an exception before it can send the email)
 procedure reset;
+
+-- set verbose option on/off
+procedure verbose (p_on in boolean := true);
 
 end mailgun_pkg;
 /

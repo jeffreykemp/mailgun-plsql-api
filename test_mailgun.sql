@@ -4,6 +4,8 @@ begin
     (p_public_api_key  => '...your mailgun public API key...'
     ,p_private_api_key => '...your mailgun private API key...'
     ,p_my_domain       => 'mydomain.com'
+    ,p_wallet_path     => 'file:/oracle/wallets/test_wallet'
+    ,p_wallet_password => 'secret'
     );
 end;
 /

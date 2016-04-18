@@ -1,26 +1,27 @@
 create or replace package body mailgun_pkg is
-/* mailgun API v0.2
+/* mailgun API v0.3
   by Jeffrey Kemp
 
   Refer to https://github.com/jeffreykemp/mailgun-plsql-api for detailed
   installation instructions and API reference.
 */
 
--- Enter your mailgun public key here
-g_public_api_key varchar2(200) := '';
-
--- Enter your mailgun secret key here
-g_private_api_key varchar2(200) := '';
-
--- Enter your domain registered with mailgun here
-g_my_domain varchar2(200) := '';
-
--- API Base URL (not including your domain)
+g_public_api_key varchar2(200);
+g_private_api_key varchar2(200);
+g_my_domain varchar2(200);
 g_api_url varchar2(200) := 'https://api.mailgun.net/v3/';
+g_wallet_path varchar2(1000);
+g_wallet_password varchar2(1000);
+
+-- if true, log all data sent to/from mailgun server
+g_verbose boolean := false;
 
 crlf constant varchar2(50) := chr(13) || chr(10);
 boundary constant varchar2(30) := '-----v4np6rnptyb566a0y704sjeqv';
 max_recipients constant integer := 1000; -- mailgun limitation for recipient variables
+
+-- internal use only
+g_last_response varchar2(32767);
 
 type t_v2arr is table of varchar2(32767) index by binary_integer;
 
@@ -65,16 +66,58 @@ procedure init
   ,p_private_api_key in varchar2 := null
   ,p_my_domain       in varchar2 := null
   ,p_api_url         in varchar2 := null
+  ,p_wallet_path     in varchar2 := null
+  ,p_wallet_password in varchar2 := null
   ) is
 begin
   msg('init');
   
-  g_public_api_key  := nvl(p_public_api_key, g_public_api_key);
+  g_public_api_key  := nvl(p_public_api_key,  g_public_api_key);
   g_private_api_key := nvl(p_private_api_key, g_private_api_key);
-  g_my_domain       := nvl(p_my_domain, g_my_domain);
-  g_api_url         := nvl(p_api_url, g_api_url);
+  g_my_domain       := nvl(p_my_domain,       g_my_domain);
+  g_api_url         := nvl(p_api_url,         g_api_url);
+  g_wallet_path     := nvl(p_wallet_path,     g_wallet_path);
+  g_wallet_password := nvl(p_wallet_password, g_wallet_password);
 
 end init;
+
+procedure log_headers (resp in out nocopy utl_http.resp) is
+  name  varchar2(256);
+  value varchar2(1024);
+begin
+  if g_verbose then
+    for i in 1..utl_http.get_header_count(resp) loop
+      utl_http.get_header(resp, i, name, value);
+      msg(name || ': ' || value);
+    end loop;
+  end if;
+end log_headers;
+
+procedure set_wallet is
+begin
+  if g_wallet_path is not null or g_wallet_password is not null then
+    utl_http.set_wallet(g_wallet_path, g_wallet_password);
+  end if;
+end set_wallet;
+
+function get_response (resp in out nocopy utl_http.resp) return varchar2 is
+  buf varchar2(32767);
+begin
+
+  begin
+    utl_http.read_text(resp, buf, 32767);
+  exception
+    when utl_http.end_of_body then
+      null;
+  end;
+  utl_http.end_response(resp);
+
+  if g_verbose then
+    msg(buf);
+  end if;
+  
+  return buf;
+end get_response;
 
 function get_json
   (p_url    in varchar2
@@ -85,8 +128,6 @@ function get_json
   url   varchar2(4000) := p_url;
   req   utl_http.req;
   resp  utl_http.resp;
-  name  varchar2(256);
-  value varchar2(1024);
   buf   varchar2(32767);
 begin
   msg('get_json ' || p_url);
@@ -96,32 +137,27 @@ begin
   if p_params is not null then
     url := url || '?' || p_params;
   end if;
+  
+  set_wallet;
 
-  req := utl_http.begin_request (url=> url, method => 'GET');
+  req := utl_http.begin_request(url, 'GET');
+
   if p_user is not null or p_pwd is not null then
     utl_http.set_authentication(req, p_user, p_pwd);
   end if;
+
   utl_http.set_header (req,'Accept','application/json');
 
   resp := utl_http.get_response(req);
   msg('HTTP response: ' || resp.status_code || ' ' || resp.reason_phrase);
 
-  for i in 1..utl_http.get_header_count(resp) loop
-    utl_http.get_header(resp, i, name, value);
-    msg(name || ': ' || value);
-  end loop;
+  log_headers(resp);
 
   if resp.status_code != '200' then
     raise_application_error(-20000, 'get_json call failed ' || resp.status_code || ' ' || resp.reason_phrase || ' [' || url || ']');
   end if;
 
-  begin
-    utl_http.read_text(resp, buf, 32767);
-  exception
-    when utl_http.end_of_body then
-      null;
-  end;
-  utl_http.end_response(resp);
+  buf := get_response(resp);
 
   msg('...finish [' || length(buf) || ']');
   return buf;
@@ -189,6 +225,16 @@ begin
          end;
 end form_field;
 
+procedure write_text
+  (req in out nocopy utl_http.req
+  ,buf in varchar2) is
+begin
+  if g_verbose then
+    msg(buf);
+  end if;
+  utl_http.write_text(req, buf);
+end write_text;
+
 procedure write_clob
   (req          in out nocopy utl_http.req
   ,file_content in clob) is
@@ -208,15 +254,13 @@ begin
   pieces := trunc (file_len / amt);  
   while (counter <= pieces) loop
     dbms_lob.read (file_content, amt, filepos, buf);
-    msg(buf);
-    utl_http.write_text(req, buf);
+    write_text(req, buf);
     filepos := counter * amt + 1;
     counter := counter + 1;
   end loop;  
   if (modulo <> 0) then
     dbms_lob.read (file_content, modulo, filepos, buf);
-    msg(buf);
-    utl_http.write_text(req, buf);
+    write_text(req, buf);
   end if;
 end write_clob;
 
@@ -265,8 +309,8 @@ procedure send_email
   header         clob;
   sender         varchar2(4000);
   recipients_to  varchar2(32767);
-  recipients_cc  varchar2(32767);
-  recipients_bcc varchar2(32767);
+  recipients_cc  varchar2(32767) := p_cc;
+  recipients_bcc varchar2(32767) := p_bcc;
   footer         varchar2(100);
   content_length integer;
   req            utl_http.req;
@@ -274,8 +318,6 @@ procedure send_email
   resp_started   boolean := false;
   my_scheme      varchar2(256);
   my_realm       varchar2(256);
-  name           varchar2(256);
-  value          varchar2(256);
   buf            varchar2(32767);
 
   procedure append_recipient (rcpt_list in out varchar2, r in t_recipient) is
@@ -287,17 +329,19 @@ procedure send_email
     rcpt_list := rcpt_list || r.email_spec;
     
     apex_json.open_object(r.email);
-    apex_json.write('email', r.email);
-    apex_json.write('name', r.name);
+    apex_json.write('email',      r.email);
+    apex_json.write('name',       r.name);
     apex_json.write('first_name', r.first_name);
-    apex_json.write('last_name', r.last_name);
-    apex_json.write('id', r.id);
+    apex_json.write('last_name',  r.last_name);
+    apex_json.write('id',         r.id);
     apex_json.close_object;
 
   end append_recipient;
 
 begin
   msg('send_email ' || p_to_email || ' "' || p_subject || '"');
+  
+  g_last_response := null;
 
   assert(g_private_api_key is not null, 'send_email: your mailgun private API key not set');
   assert(g_my_domain is not null, 'send_email: your mailgun domain not set');
@@ -310,17 +354,12 @@ begin
   end if;
 
   if p_to_email is not null then
-    send_to
-      (p_email => p_to_email
-      ,p_name  => p_to_name);
-  end if;
-
-  if p_cc is not null then
-    send_cc(p_cc);
-  end if;
-
-  if p_bcc is not null then
-    send_bcc(p_bcc);
+    assert(g_recipient.count = 0, 'cannot mix multiple recipients with p_to_email parameter');
+    if p_to_email like '% <%>%' then
+      recipients_to := p_to_email;
+    else
+      recipients_to := nvl(p_to_name, p_to_email) || ' <' || p_to_email || '>';
+    end if;
   end if;
   
   apex_json.initialize_clob_output;
@@ -328,11 +367,18 @@ begin
 
   if g_recipient.count > 0 then
     for i in 1..g_recipient.count loop
+
       case g_recipient(i).send_by
-      when 'to'  then append_recipient(recipients_to, g_recipient(i));
-      when 'cc'  then append_recipient(recipients_cc, g_recipient(i));
-      when 'bcc' then append_recipient(recipients_bcc, g_recipient(i));
+      when 'to'  then
+        append_recipient(recipients_to, g_recipient(i));
+        
+      when 'cc'  then
+        append_recipient(recipients_cc, g_recipient(i));
+
+      when 'bcc' then
+        append_recipient(recipients_bcc, g_recipient(i));
       end case;
+
     end loop;
   end if;
   
@@ -387,8 +433,10 @@ begin
 
   -- Turn off checking of status code. We will check it by ourselves.
   utl_http.set_response_error_check(false);
+
+  set_wallet;
   
-  req := utl_http.begin_request(url, method=>'POST');
+  req := utl_http.begin_request(url, 'POST');
   
   utl_http.set_authentication(req, 'api', g_private_api_key); -- Use HTTP Basic Authen. Scheme
   
@@ -397,13 +445,12 @@ begin
   
   msg('writing message contents...');
   
-  msg(header);
   write_clob(req, header);
 
   if g_attachment.count > 0 then
     for i in 1..g_attachment.count loop
 
-      utl_http.write_text(req, g_attachment(i).header);
+      write_text(req, g_attachment(i).header);
 
       if g_attachment(i).clob_content is not null then
         write_clob(req, g_attachment(i).clob_content);
@@ -411,13 +458,12 @@ begin
         write_blob(req, g_attachment(i).blob_content);
       end if;
 
-      utl_http.write_text(req, crlf);
+      write_text(req, crlf);
 
     end loop;
   end if;
 
-  msg(footer);
-  utl_http.write_text(req, footer);
+  write_text(req, footer);
   
   msg('reading response from server...');
   
@@ -436,26 +482,18 @@ begin
     raise_application_error(-20000, 'proxy auth required');
   end if;
   
-  -- log any headers from the server
-  for i in 1..utl_http.get_header_count(resp) loop
-    utl_http.get_header(resp, i, name, value);
-    msg(name || ': ' || value);
-  end loop;
+  log_headers(resp);
+
+  if resp.status_code != '200' then
+    raise_application_error(-20000, 'post failed ' || resp.status_code || ' ' || resp.reason_phrase || ' [' || url || ']');
+  end if;
   
-  -- log any response from the server
-  begin
-    utl_http.read_text (resp, buf, 32767);
-    -- expected response will be a json document like this:
-    --{
-    --  "id": "<messageid@domain>",
-    --  "message": "Queued. Thank you."
-    --}
-    msg(buf);
-  exception
-    when utl_http.end_of_body then
-      null;
-  end;
-  utl_http.end_response (resp);
+  -- expected response will be a json document like this:
+  --{
+  --  "id": "<messageid@domain>",
+  --  "message": "Queued. Thank you."
+  --}
+  g_last_response := get_response(resp);
   
   reset;
   apex_json.free_output;
@@ -588,7 +626,7 @@ procedure attach
   ) is
   attachment t_attachment;
 begin
-  msg('attach');
+  msg('attach(blob) ' || p_file_name);
   
   assert(p_file_content is not null, 'attach(blob): p_file_content cannot be null');
   
@@ -610,7 +648,7 @@ procedure attach
   ) is
   attachment t_attachment;
 begin
-  msg('attach');
+  msg('attach(clob) ' || p_file_name);
 
   assert(p_file_content is not null, 'attach(clob): p_file_content cannot be null');
   
@@ -624,6 +662,11 @@ begin
   
 end attach;
 
+function last_response return varchar2 is
+begin
+  return g_last_response;
+end last_response;
+
 procedure reset is
 begin
   msg('reset');
@@ -632,6 +675,14 @@ begin
   g_attachment.delete;
 
 end reset;
+
+procedure verbose (p_on in boolean := true) is
+begin
+  msg('verbose ' || apex_debug.tochar(p_on));
+  
+  g_verbose := p_on;
+
+end verbose;
 
 end mailgun_pkg;
 /
