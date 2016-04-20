@@ -16,7 +16,8 @@ create type t_mailgun_recipient is object
 /
 
 create type t_mailgun_attachment is object
-  ( blob_content blob
+  ( file_name    varchar2(512)
+  , blob_content blob
   , clob_content clob
   , header       varchar2(4000)
   );
@@ -29,7 +30,8 @@ create type t_mailgun_attachment_arr is table of t_mailgun_attachment;
 /
 
 create type t_mailgun_email is object
-  ( from_name      varchar2(4000)
+  ( requested_ts   timestamp
+  , from_name      varchar2(4000)
   , from_email     varchar2(4000)
   , reply_to       varchar2(4000)
   , to_name        varchar2(4000)

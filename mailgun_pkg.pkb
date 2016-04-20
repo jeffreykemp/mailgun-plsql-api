@@ -6,10 +6,11 @@ create or replace package body mailgun_pkg is
   installation instructions and API reference.
 */
 
+-- use your own method to obtain these values for your environment
 g_public_api_key  varchar2(200) := site_parameter.get_value('MAILGUN_PUBLIC_KEY');
 g_private_api_key varchar2(200) := site_parameter.get_value('MAILGUN_SECRET_KEY');
-g_my_domain       varchar2(200) := 'jk64.com';
-g_api_url         varchar2(200) := 'http://api.jk64.com/mailgun/v3/'; --'https://api.mailgun.net/v3/';
+g_my_domain       varchar2(200) := site_parameter.get_value('MAILGUN_MY_DOMAIN');
+g_api_url         varchar2(200) := site_parameter.get_value('MAILGUN_API_URL'); --'https://api.mailgun.net/v3/';
 g_wallet_path     varchar2(1000);
 g_wallet_password varchar2(1000);
 
@@ -24,26 +25,6 @@ payload_type constant varchar2(30) := 't_mailgun_email';
 crlf constant varchar2(50) := chr(13) || chr(10);
 boundary constant varchar2(30) := '-----v4np6rnptyb566a0y704sjeqv';
 max_recipients constant integer := 1000; -- mailgun limitation for recipient variables
-
---type t_recipient is record
---  (send_by    varchar2(3)    --to/cc/bcc
---  ,email_spec varchar2(1000) -- name <email>
---   -- mailgun recipient variables:
---  ,email      varchar2(512) -- %recipient.email%
---  ,name       varchar2(200) -- %recipient.name%
---  ,first_name varchar2(200) -- %recipient.first_name%
---  ,last_name  varchar2(200) -- %recipient.last_name%
---  ,id         varchar2(200) -- %recipient.id%
---  );
---
---type t_attachment is record
---  (blob_content blob
---  ,clob_content clob
---  ,header       varchar2(4000)
---  );
-
---type t_rcpt is table of t_recipient index by binary_integer;
---type t_arr is table of t_attachment index by binary_integer;
 
 g_recipient t_mailgun_recipient_arr;
 g_attachment t_mailgun_attachment_arr;
@@ -261,7 +242,7 @@ begin
     filepos := counter * amt + 1;
     counter := counter + 1;
   end loop;  
-  if (modulo <> 0) then
+  if modulo != 0 then
     dbms_lob.read (file_content, modulo, filepos, buf);
     write_text(req, buf);
   end if;
@@ -290,7 +271,7 @@ begin
     filepos := counter * amt + 1;
     counter := counter + 1;
   end loop;  
-  if (modulo <> 0) then
+  if modulo != 0 then
     dbms_lob.read (file_content, modulo, filepos, buf);
     utl_http.write_raw(req, buf);
   end if;
@@ -304,7 +285,6 @@ procedure send_email_synchronous (p_payload in out nocopy t_mailgun_email) is
   recipients_cc    varchar2(32767);
   recipients_bcc   varchar2(32767);
   footer           varchar2(100);
-  content_length   integer;
   req              utl_http.req;
   resp             utl_http.resp;
   resp_started     boolean := false;
@@ -313,6 +293,9 @@ procedure send_email_synchronous (p_payload in out nocopy t_mailgun_email) is
   buf              varchar2(32767);
   recipient_count  integer := 0;
   attachment_count integer := 0;
+  attachment_size  integer;
+  resp_text        varchar2(32767);
+  log              mailgun_email_log%rowtype;
 
   procedure append_recipient (rcpt_list in out varchar2, r in t_mailgun_recipient) is
   begin
@@ -331,6 +314,32 @@ procedure send_email_synchronous (p_payload in out nocopy t_mailgun_email) is
     apex_json.close_object;
 
   end append_recipient;
+  
+  procedure log_response is
+  begin
+    msg('log_response');
+
+    log.requested_ts    := p_payload.requested_ts;
+    log.sent_ts         := systimestamp;
+    log.from_name       := p_payload.reply_to;
+    log.from_email      := p_payload.from_email;
+    log.reply_to        := p_payload.reply_to;
+    log.to_name         := p_payload.to_name;
+    log.to_email        := p_payload.to_email;
+    log.cc              := p_payload.cc;
+    log.bcc             := p_payload.bcc;
+    log.subject         := p_payload.subject;
+    log.message         := p_payload.message;
+    log.tag             := p_payload.tag;
+    log.recipients      := recipients_to;
+
+    apex_json.parse( resp_text );
+    log.mailgun_id      := apex_json.get_varchar2('id');
+    log.mailgun_message := apex_json.get_varchar2('message');
+
+    insert into mailgun_email_log values log;
+
+  end log_response;
 
 begin
   msg('send_email_synchronous ' || p_payload.to_email || ' "' || p_payload.subject || '"');
@@ -339,14 +348,18 @@ begin
   assert(g_my_domain is not null, 'send_email_synchronous: your mailgun domain not set');
   assert(p_payload.from_email is not null, 'send_email_synchronous: from_email cannot be null');
   
+  if p_payload.recipient is not null then
+    recipient_count := p_payload.recipient.count;
+  end if;
+
+  if p_payload.attachment is not null then
+    attachment_count := p_payload.attachment.count;
+  end if;
+
   if p_payload.from_email like '% <%>%' then
     sender := p_payload.from_email;
   else
     sender := nvl(p_payload.from_name,p_payload.from_email) || ' <'||p_payload.from_email||'>';
-  end if;
-
-  if p_payload.recipient is not null then
-    recipient_count := p_payload.recipient.count;
   end if;
 
   if p_payload.to_email is not null then
@@ -407,32 +420,32 @@ begin
 
   footer := '--' || boundary || '--';
   
-  content_length := dbms_lob.getlength(header)
-                  + length(footer);
-
-  if p_payload.attachment is not null then
-    attachment_count := p_payload.attachment.count;
-  end if;
+  log.total_bytes := dbms_lob.getlength(header)
+                   + length(footer);
 
   if attachment_count > 0 then
     for i in 1..attachment_count loop
 
-      content_length := content_length
-                      + length(p_payload.attachment(i).header)
-                      + length(crlf);
-
       if p_payload.attachment(i).clob_content is not null then
-        content_length := content_length
-                        + dbms_lob.getlength(p_payload.attachment(i).clob_content);
+        attachment_size := dbms_lob.getlength(p_payload.attachment(i).clob_content);
       elsif p_payload.attachment(i).blob_content is not null then
-        content_length := content_length
-                        + dbms_lob.getlength(p_payload.attachment(i).blob_content);
+        attachment_size := dbms_lob.getlength(p_payload.attachment(i).blob_content);
       end if;
+
+      log.total_bytes := log.total_bytes
+                       + length(p_payload.attachment(i).header)
+                       + attachment_size
+                       + length(crlf);
+      
+      if log.attachments is not null then
+        log.attachments := log.attachments || ' (' || attachment_size || ' bytes), ';
+      end if;
+      log.attachments := log.attachments || p_payload.attachment(i).file_name;
 
     end loop;
   end if;
   
-  msg('content_length=' || content_length);
+  msg('content_length=' || log.total_bytes);
 
   -- Turn off checking of status code. We will check it by ourselves.
   utl_http.set_response_error_check(false);
@@ -444,7 +457,7 @@ begin
   utl_http.set_authentication(req, 'api', g_private_api_key); -- Use HTTP Basic Authen. Scheme
   
   utl_http.set_header(req, 'Content-Type', 'multipart/form-data; boundary="' || boundary || '"');
-  utl_http.set_header(req, 'Content-Length', content_length);
+  utl_http.set_header(req, 'Content-Length', log.total_bytes);
   
   msg('writing message contents...');
   
@@ -496,7 +509,8 @@ begin
   --  "id": "<messageid@domain>",
   --  "message": "Queued. Thank you."
   --}
-  msg(get_response(resp));
+  resp_text := get_response(resp);
+  log_response;
   
   apex_json.free_output;
   dbms_lob.freetemporary(header);
@@ -550,18 +564,19 @@ begin
   end if;
   
   payload := t_mailgun_email
-    ( from_name  => p_from_name
-    , from_email => p_from_email
-    , reply_to   => p_reply_to
-    , to_name    => p_to_name
-    , to_email   => p_to_email
-    , cc         => p_cc
-    , bcc        => p_bcc
-    , subject    => p_subject
-    , message    => p_message
-    , tag        => p_tag
-    , recipient  => g_recipient
-    , attachment => g_attachment
+    ( requested_ts => systimestamp
+    , from_name    => p_from_name
+    , from_email   => p_from_email
+    , reply_to     => p_reply_to
+    , to_name      => p_to_name
+    , to_email     => p_to_email
+    , cc           => p_cc
+    , bcc          => p_bcc
+    , subject      => p_subject
+    , message      => p_message
+    , tag          => p_tag
+    , recipient    => g_recipient
+    , attachment   => g_attachment
     );
 
   enq_msg_props.expiration := 6 * 60 * 60; -- expire after 6 hours
@@ -618,15 +633,15 @@ begin
     email_spec := nvl(r.name, p_email) || ' <' || p_email || '>';
     email      := p_email;
   end if;
-  
+
   r := t_mailgun_recipient
-    ( p_send_by
-    , email_spec
-    , email
-    , nvl(p_name, trim(p_first_name || ' ' || p_last_name))
-    , p_first_name
-    , p_last_name
-    , p_id
+    ( send_by    => p_send_by
+    , email_spec => email_spec
+    , email      => email
+    , name       => nvl(p_name, trim(p_first_name || ' ' || p_last_name))
+    , first_name => p_first_name
+    , last_name  => p_last_name
+    , id         => p_id
     );
 
   if g_recipient is null then
@@ -721,12 +736,13 @@ begin
   assert(p_file_content is not null, 'attach(blob): p_file_content cannot be null');
 
   r := t_mailgun_attachment
-    ( p_file_content
-    , null /*clob*/
-    , attachment_header
-      (p_file_name    => p_file_name
-      ,p_content_type => p_content_type
-      ,p_inline       => p_inline)
+    ( file_name    => p_file_name
+    , blob_content => p_file_content
+    , clob_content => null
+    , header       => attachment_header
+        (p_file_name    => p_file_name
+        ,p_content_type => p_content_type
+        ,p_inline       => p_inline)
     );
   
   if g_attachment is null then
@@ -750,12 +766,13 @@ begin
   assert(p_file_content is not null, 'attach(clob): p_file_content cannot be null');
 
   r := t_mailgun_attachment
-    ( null /*blob*/
-    , p_file_content
-    , attachment_header
-      (p_file_name    => p_file_name
-      ,p_content_type => p_content_type
-      ,p_inline       => p_inline)
+    ( file_name    => p_file_name
+    , blob_content => null
+    , clob_content => p_file_content
+    , header       => attachment_header
+        (p_file_name    => p_file_name
+        ,p_content_type => p_content_type
+        ,p_inline       => p_inline)
     );
   
   if g_attachment is null then
@@ -773,6 +790,7 @@ begin
   dbms_aqadm.create_queue_table
     (queue_table        => user||'.'||queue_table
     ,queue_payload_type => user||'.'||payload_type
+    ,sort_list          => 'priority,enq_time'
     ,storage_clause     => 'nested table user_data.recipient store as mailgun_recipient_tab'
                         ||',nested table user_data.attachment store as mailgun_attachment_tab'
     );
@@ -822,6 +840,9 @@ procedure push_queue as
 begin
   msg('push_queue');
   
+  -- commit any emails requested in the current session
+  commit;
+  
   r_dequeue_options.wait := dbms_aq.no_wait;
 
   -- loop through all messages in the queue until there is none
@@ -847,7 +868,7 @@ exception
   when e_no_queue_data then
     msg('push_queue finished');
   when others then
-    rollback;
+    rollback; -- the queue will treat the message as failed
     msg(sqlerrm);
     msg(dbms_utility.format_error_stack);
     msg(dbms_utility.format_error_backtrace);

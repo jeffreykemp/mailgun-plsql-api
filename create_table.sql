@@ -1,3 +1,5 @@
+-- table to record logs of sent/attempted emails
+drop table mailgun_email_log;
 create table mailgun_email_log
   ( requested_ts    timestamp
   , sent_ts         timestamp
@@ -13,6 +15,7 @@ create table mailgun_email_log
   , tag             varchar2(4000)
   , recipients      varchar2(4000)
   , attachments     varchar2(4000)
+  , total_bytes     integer
   , mailgun_id      varchar2(4000)
   , mailgun_message varchar2(4000)
   );
