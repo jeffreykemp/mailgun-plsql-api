@@ -31,6 +31,11 @@ create or replace package mailgun_pkg is
     grant execute on apex_debug to myschema;
     grant execute on dbms_output to myschema;
   
+  * Grants needed for self-administered AQ:
+  
+    grant execute on dbms_aq to myschema;
+    grant execute on dbms_aqadm to myschema;
+  
   * Mailgun account - sign up here: https://mailgun.com/signup
 
   * Your server must be able to connect via https to api.mailgun.net
@@ -54,6 +59,12 @@ recipient_name       constant varchar2(100) := '%recipient.name%';
 recipient_first_name constant varchar2(100) := '%recipient.first_name%';
 recipient_last_name  constant varchar2(100) := '%recipient.last_name%';
 recipient_id         constant varchar2(100) := '%recipient.id%';
+
+-- default queue priority
+priority_default constant integer := 3;
+
+-- default job frequency
+repeat_interval_default constant varchar2(200) := 'FREQ=MINUTELY;INTERVAL=5;';
 
 -- init: set up mailgun parameters
 -- (Note: you can set these directly by editing the package body if you want)
@@ -93,16 +104,17 @@ function email_is_valid (p_address in varchar2) return boolean;
 -- (to attach files to the email, call attach() for each attachment, then call
 -- send_email last)
 procedure send_email
-  (p_from_name    in varchar2 := null
-  ,p_from_email   in varchar2
-  ,p_reply_to     in varchar2 := null
-  ,p_to_name      in varchar2 := null
-  ,p_to_email     in varchar2 := null -- optional if the send_xx have been called already
-  ,p_cc           in varchar2 := null
-  ,p_bcc          in varchar2 := null
-  ,p_subject      in varchar2
-  ,p_message      in clob /*html allowed*/
-  ,p_tag          in varchar2 := null
+  (p_from_name      in varchar2 := null
+  ,p_from_email     in varchar2
+  ,p_reply_to       in varchar2 := null
+  ,p_to_name        in varchar2 := null
+  ,p_to_email       in varchar2 := null -- optional if the send_xx have been called already
+  ,p_cc             in varchar2 := null
+  ,p_bcc            in varchar2 := null
+  ,p_subject        in varchar2
+  ,p_message        in clob /*html allowed*/
+  ,p_tag            in varchar2 := null
+  ,p_priority       in number   := priority_default -- lower numbers are processed first
   );
 
 -- call these BEFORE send_email to add multiple recipients
@@ -153,9 +165,23 @@ procedure attach
   ,p_inline       in boolean := false
   );
 
--- returns the response text from the mailgun server for the most recent
--- successful call (expected to be in json format)
-function last_response return varchar2;
+-- create the queue for asynchronous emails
+procedure create_queue;
+
+-- drop the queue
+procedure drop_queue;
+
+-- purge any expired (failed) emails stuck in the queue
+procedure purge_queue;
+
+-- send emails in the queue
+procedure push_queue;
+
+-- create a job to periodically call push_queue
+procedure create_job (repeat_interval in varchar2 := repeat_interval_default);
+
+-- drop the job
+procedure drop_job;
 
 -- call this to clear any attachments (note: send_email does this for you)
 -- (e.g. if your proc raises an exception before it can send the email)
