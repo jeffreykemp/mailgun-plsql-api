@@ -3,6 +3,8 @@
 
 Validate email addresses and send emails with pure PL/SQL.
 
+> *Warning: use the [Latest Release](https://github.com/jeffreykemp/mailgun-plsql-api/releases/latest) - don't use the "Download Zip" option on the home page (may contain unfinished work).*
+
 It includes:
   
   * email validator - does the same thing as the [jQuery-based Apex plugin](https://github.com/jeffreykemp/jk64-plugin-mailgunemailvalidator), except from the server
