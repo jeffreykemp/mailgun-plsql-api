@@ -1,4 +1,4 @@
-create or replace package mailgun_pkg is
+create or replace package mailgun_aq_pkg is
 /* mailgun asynchronous API v0.4
   by Jeffrey Kemp
   
@@ -69,7 +69,7 @@ procedure create_job
 -- drop the job
 procedure drop_job;
 
-end mailgun_pkg;
+end mailgun_aq_pkg;
 /
 
 show errors

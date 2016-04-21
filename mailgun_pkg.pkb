@@ -6,10 +6,10 @@ create or replace package body mailgun_pkg is
   installation instructions and API reference.
 */
 
-g_public_api_key  varchar2(200);
-g_private_api_key varchar2(200);
-g_my_domain       varchar2(200);
-g_api_url         varchar2(200) := 'https://api.mailgun.net/v3/';
+g_public_api_key  varchar2(200) := site_parameter.get_value('MAILGUN_PUBLIC_KEY');
+g_private_api_key varchar2(200) := site_parameter.get_value('MAILGUN_SECRET_KEY');
+g_my_domain       varchar2(200) := site_parameter.get_value('MAILGUN_MY_DOMAIN');
+g_api_url         varchar2(200) := site_parameter.get_value('MAILGUN_API_URL'); --'https://api.mailgun.net/v3/';
 g_wallet_path     varchar2(1000);
 g_wallet_password varchar2(1000);
 
@@ -322,6 +322,8 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
   end append_recipient;
   
   procedure log_response is
+    -- needs to commit the log entry independently of calling transaction
+    pragma autonomous_transaction;
   begin
     msg('log_response');
 
@@ -335,16 +337,23 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
     log.cc              := p_payload.cc;
     log.bcc             := p_payload.bcc;
     log.subject         := p_payload.subject;
-    log.message         := p_payload.message;
+    log.message         := SUBSTR(p_payload.message, 1, 4000);
     log.tag             := p_payload.tag;
-    log.recipients      := recipients_to;
+    log.recipients      := SUBSTR(recipients_to, 1, 4000);
 
     apex_json.parse( resp_text );
     log.mailgun_id      := apex_json.get_varchar2('id');
     log.mailgun_message := apex_json.get_varchar2('message');
+    
+    msg('response: ' || log.mailgun_message);
+    msg('msg id: ' || log.mailgun_id);
 
     insert into mailgun_email_log values log;
+    msg('inserted mailgun_email_log: ' || sql%rowcount);
 
+    msg('commit');
+    commit;
+    
   end log_response;
 
 begin
@@ -389,11 +398,9 @@ begin
 
         case p_payload.recipient(i).send_by
         when 'to'  then
-          append_recipient(recipients_to, p_payload.recipient(i));
-          
+          append_recipient(recipients_to, p_payload.recipient(i));          
         when 'cc'  then
           append_recipient(recipients_cc, p_payload.recipient(i));
-
         when 'bcc' then
           append_recipient(recipients_bcc, p_payload.recipient(i));
         end case;
@@ -545,17 +552,16 @@ exception
 end send_email;
 
 function get_payload
-  (p_from_name      in varchar2 := null
+  (p_from_name      in varchar2
   ,p_from_email     in varchar2
-  ,p_reply_to       in varchar2 := null
-  ,p_to_name        in varchar2 := null
-  ,p_to_email       in varchar2 := null
-  ,p_cc             in varchar2 := null
-  ,p_bcc            in varchar2 := null
+  ,p_reply_to       in varchar2
+  ,p_to_name        in varchar2
+  ,p_to_email       in varchar2
+  ,p_cc             in varchar2
+  ,p_bcc            in varchar2
   ,p_subject        in varchar2
   ,p_message        in clob
-  ,p_tag            in varchar2 := null
-  ,p_priority       in number   := priority_default
+  ,p_tag            in varchar2
   ) return t_mailgun_email is
   payload t_mailgun_email;
 begin
@@ -606,7 +612,6 @@ procedure send_email
   ,p_subject        in varchar2
   ,p_message        in clob
   ,p_tag            in varchar2 := null
-  ,p_priority       in number   := priority_default
   ) is
   enq_opts        dbms_aq.enqueue_options_t;
   enq_msg_props   dbms_aq.message_properties_t;
@@ -619,16 +624,16 @@ begin
   assert(g_my_domain is not null, 'send_email: your mailgun domain not set');
   
   payload := get_payload
-    ( from_name    => p_from_name
-    , from_email   => p_from_email
-    , reply_to     => p_reply_to
-    , to_name      => p_to_name
-    , to_email     => p_to_email
-    , cc           => p_cc
-    , bcc          => p_bcc
-    , subject      => p_subject
-    , message      => p_message
-    , tag          => p_tag
+    ( p_from_name    => p_from_name
+    , p_from_email   => p_from_email
+    , p_reply_to     => p_reply_to
+    , p_to_name      => p_to_name
+    , p_to_email     => p_to_email
+    , p_cc           => p_cc
+    , p_bcc          => p_bcc
+    , p_subject      => p_subject
+    , p_message      => p_message
+    , p_tag          => p_tag
     );
 
   send_email(p_payload => payload);
@@ -650,6 +655,7 @@ procedure add_recipient
   ,p_id         in varchar2
   ,p_send_by    in varchar2
   ) is
+  name varchar2(4000);
 begin
   msg('add_recipient ' || p_send_by || ': ' || p_name || ' <' || p_email || '> #' || p_id);
   
@@ -658,6 +664,8 @@ begin
   assert(p_email is not null, 'add_recipient: p_email cannot be null');
   assert(p_send_by is not null, 'add_recipient: p_send_by cannot be null');
   assert(p_send_by in ('to','cc','bcc'), 'p_send_by must be to/cc/bcc');
+  
+  name := nvl(p_name, trim(p_first_name || ' ' || p_last_name));
 
   if g_recipient is null then
     g_recipient := t_mailgun_recipient_arr();
@@ -667,13 +675,13 @@ begin
     ( send_by     => p_send_by
     , email_spec  => case when p_email like '% <%>'
                      then p_email
-                     else nvl(r.name, p_email) || ' <' || p_email || '>'
+                     else nvl(name, p_email) || ' <' || p_email || '>'
                      end
     , email       => case when p_email like '% <%>'
                      then rtrim(ltrim(regexp_substr(p_email, '<.*>', 1, 1), '<'), '>')
                      else p_email
                      end
-    , name        => nvl(p_name, trim(p_first_name || ' ' || p_last_name))
+    , name        => name
     , first_name  => p_first_name
     , last_name   => p_last_name
     , id          => p_id

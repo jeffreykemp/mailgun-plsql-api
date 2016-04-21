@@ -1,3 +1,15 @@
+-- Note: mailgun_aq_pkg requires your mailgun settings to be compiled into
+--       mailgun_pkg. It is recommended that you add calls to populate them
+--       using your own code (instead of hardcoding your private key in the
+--       code).
+
+-- set up mailgun AQ
+begin
+  mailgun_aq_pkg.create_queue;
+  mailgun_aq_pkg.create_job;
+end;
+/
+
 -- send a simple email
 begin
   mailgun_aq_pkg.send_email
@@ -6,6 +18,19 @@ begin
     ,p_subject    => 'test subject ' || to_char(systimestamp,'DD/MM/YYYY HH24:MI:SS.FF')
     ,p_message    => 'Test Email Body'
     );
+  commit;
+end;
+/
+
+-- push the queue
+begin
+  mailgun_aq_pkg.push_queue;
+end;
+/
+
+-- purge failed messages
+begin
+  mailgun_aq_pkg.purge_queue;
 end;
 /
 
@@ -27,6 +52,7 @@ begin
     ,p_tag        => 'testtag2'
     ,p_priority   => 1
     );
+  mailgun_aq_pkg.push_queue;
 end;
 /
 
@@ -49,6 +75,7 @@ begin
                   || '<br>'
                   || 'Reference: ' || mailgun_pkg.recipient_id
     );
+  mailgun_aq_pkg.push_queue;
 exception
   when others then
     mailgun_pkg.reset; -- clear any recipients from memory
@@ -102,6 +129,8 @@ begin
                   || '<img src="cid:myimage.jpg">'
                   || '</body></html>'
     );
+
+  mailgun_aq_pkg.push_queue;
 
 exception
   when others then

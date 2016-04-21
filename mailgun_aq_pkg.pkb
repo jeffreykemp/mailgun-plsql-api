@@ -1,4 +1,4 @@
-create or replace package body mailgun_pkg is
+create or replace package body mailgun_aq_pkg is
 /* mailgun asynchronous API v0.4
   by Jeffrey Kemp
   
@@ -52,16 +52,16 @@ begin
   msg('send_email ' || p_to_email || ' "' || p_subject || '"');
   
   payload := mailgun_pkg.get_payload
-    ( from_name    => p_from_name
-    , from_email   => p_from_email
-    , reply_to     => p_reply_to
-    , to_name      => p_to_name
-    , to_email     => p_to_email
-    , cc           => p_cc
-    , bcc          => p_bcc
-    , subject      => p_subject
-    , message      => p_message
-    , tag          => p_tag
+    ( p_from_name    => p_from_name
+    , p_from_email   => p_from_email
+    , p_reply_to     => p_reply_to
+    , p_to_name      => p_to_name
+    , p_to_email     => p_to_email
+    , p_cc           => p_cc
+    , p_bcc          => p_bcc
+    , p_subject      => p_subject
+    , p_message      => p_message
+    , p_tag          => p_tag
     );
 
   enq_msg_props.expiration := 6 * 60 * 60; -- expire after 6 hours
@@ -138,8 +138,6 @@ procedure push_queue as
   r_message_properties dbms_aq.message_properties_t;
   msgid                raw(16);
   payload              t_mailgun_email;
-  msg                  varchar2(4000);
-  resp                 varchar2(4000);
   dequeue_count        integer := 0;
 begin
   msg('push_queue');
@@ -186,6 +184,8 @@ procedure create_job
   (p_repeat_interval in varchar2 := repeat_interval_default) is
 begin
   msg('create_job ' || job_name);
+  
+  assert(p_repeat_interval is not null, 'create_job: p_repeat_interval cannot be null');
 
   dbms_scheduler.create_job
     (job_name        => job_name
@@ -209,7 +209,7 @@ begin
 
 end drop_job;
 
-end mailgun_pkg;
+end mailgun_aq_pkg;
 /
 
 show errors
