@@ -42,6 +42,7 @@ procedure send_email
   ,p_subject        in varchar2
   ,p_message        in clob
   ,p_tag            in varchar2 := null
+  ,p_mail_headers in varchar2   := null
   ,p_priority       in number   := priority_default
   ) is
   enq_opts        dbms_aq.enqueue_options_t;
@@ -62,6 +63,7 @@ begin
     , p_subject      => p_subject
     , p_message      => p_message
     , p_tag          => p_tag
+    , p_mail_headers => p_mail_headers
     );
 
   enq_msg_props.expiration := 6 * 60 * 60; -- expire after 6 hours

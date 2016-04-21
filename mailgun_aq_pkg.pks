@@ -47,6 +47,7 @@ procedure send_email
   ,p_subject        in varchar2
   ,p_message        in clob /*html allowed*/
   ,p_tag            in varchar2 := null
+  ,p_mail_headers   in varchar2 := null /*json*/
   ,p_priority       in number   := priority_default -- lower numbers are processed first
   );
 

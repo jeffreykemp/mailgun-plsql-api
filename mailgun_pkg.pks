@@ -107,6 +107,7 @@ procedure send_email
   ,p_subject      in varchar2
   ,p_message      in clob /*html allowed*/
   ,p_tag          in varchar2 := null
+  ,p_mail_headers in varchar2 := null /*json*/
   );
 
 -- call these BEFORE send_email to add multiple recipients
@@ -176,6 +177,7 @@ function get_payload
   ,p_subject      in varchar2
   ,p_message      in clob
   ,p_tag          in varchar2
+  ,p_mail_headers in varchar2
   ) return t_mailgun_email;
 procedure send_email (p_payload in out nocopy t_mailgun_email);
 

@@ -12,6 +12,7 @@ create table mailgun_email_log
   , subject         varchar2(4000)
   , message         varchar2(4000)
   , tag             varchar2(4000)
+  , mail_headers    varchar2(4000)
   , recipients      varchar2(4000)
   , attachments     varchar2(4000)
   , total_bytes     integer

@@ -217,6 +217,41 @@ begin
          end;
 end form_field;
 
+function render_mail_headers (mail_headers in varchar2) return varchar2 is
+  vals apex_json.t_values;
+  tag  varchar2(32767);
+  val  apex_json.t_value;
+  buf  varchar2(32767);
+begin
+  msg('render_mail_headers');
+
+  apex_json.parse(vals, mail_headers);
+
+  tag := vals.first;
+  loop
+    exit when tag is null;
+
+    val := vals(tag);
+
+    -- Mailgun accepts arbitrary MIME headers with the "h:" prefix, e.g.
+    -- h:Priority
+    case val.kind
+    when apex_json.c_varchar2 then
+      msg('h:'||tag||' = ' || val.varchar2_value);
+      buf := buf || form_field('h:'||tag, val.varchar2_value);
+    when apex_json.c_number then
+      msg('h:'||tag||' = ' || val.number_value);
+      buf := buf || form_field('h:'||tag, to_char(val.number_value));
+    else
+      null;
+    end case;
+
+    tag := vals.next(tag);
+  end loop;
+  
+  return buf;
+end render_mail_headers;
+
 procedure write_text
   (req in out nocopy utl_http.req
   ,buf in varchar2) is
@@ -340,6 +375,7 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
     log.subject         := p_payload.subject;
     log.message         := SUBSTR(p_payload.message, 1, 4000);
     log.tag             := p_payload.tag;
+    log.mail_headers    := SUBSTR(p_payload.mail_headers, 1, 4000);
     log.recipients      := SUBSTR(recipients_to, 1, 4000);
 
     apex_json.parse( resp_text );
@@ -426,7 +462,7 @@ begin
       || field_header('recipient-variables');
     
     dbms_lob.append(header, apex_json.get_clob_output);
-
+    
     apex_json.free_output;
    
   exception
@@ -434,6 +470,11 @@ begin
       apex_json.free_output;
       raise;
   end;
+
+  if p_payload.mail_headers is not null then
+    buf := render_mail_headers(p_payload.mail_headers);
+    dbms_lob.writeappend(header, length(buf), buf);
+  end if;
 
   buf := crlf || field_header('html');
   dbms_lob.writeappend(header, length(buf), buf);
@@ -563,6 +604,7 @@ function get_payload
   ,p_subject        in varchar2
   ,p_message        in clob
   ,p_tag            in varchar2
+  ,p_mail_headers   in varchar2
   ) return t_mailgun_email is
   payload t_mailgun_email;
 begin
@@ -588,6 +630,7 @@ begin
     , subject      => p_subject
     , message      => p_message
     , tag          => p_tag
+    , mail_headers => p_mail_headers
     , recipient    => g_recipient
     , attachment   => g_attachment
     );
@@ -613,6 +656,7 @@ procedure send_email
   ,p_subject        in varchar2
   ,p_message        in clob
   ,p_tag            in varchar2 := null
+  ,p_mail_headers   in varchar2 := null
   ) is
   enq_opts        dbms_aq.enqueue_options_t;
   enq_msg_props   dbms_aq.message_properties_t;
@@ -635,6 +679,7 @@ begin
     , p_subject      => p_subject
     , p_message      => p_message
     , p_tag          => p_tag
+    , p_mail_headers => p_mail_headers
     );
 
   send_email(p_payload => payload);

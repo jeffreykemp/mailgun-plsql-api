@@ -68,19 +68,24 @@ end;
 -- send an email using all the options, including adding an unsubscribe link
 begin
   mailgun_pkg.send_email
-    (p_from_name  => 'Mr Sender'
-    ,p_from_email => 'sender@host.com'
-    ,p_reply_to   => 'reply@host.com'
-    ,p_to_name    => 'Mr Recipient'
-    ,p_to_email   => 'recipient@example.com'
-    ,p_cc         => 'Mrs CC <cc@example.com>'
-    ,p_bcc        => 'Ms BCC <bcc@example.com>'
-    ,p_subject    => 'test subject ' || to_char(systimestamp,'DD/MM/YYYY HH24:MI:SS.FF')
-    ,p_message    => '<html><body><strong>Test Email Body</strong>'
-                  || '<p>'
-                  || '<a href="' || mailgun_pkg.unsubscribe_link_tag || '">Unsubscribe</a>'
-                  || '</body></html>'
-    ,p_tag        => 'testtag2'
+    (p_from_name    => 'Mr Sender'
+    ,p_from_email   => 'sender@jk64.com'
+    ,p_reply_to     => 'reply@jk64.com'
+    ,p_to_name      => 'Mr Recipient'
+    ,p_to_email     => 'recipient@jk64.com'
+    --,p_cc           => 'Mrs CC <cc@jk64.com>'
+    --,p_bcc          => 'Ms BCC <bcc@jk64.com>'
+    ,p_subject      => 'test subject ' || to_char(systimestamp,'DD/MM/YYYY HH24:MI:SS.FF')
+    ,p_message      => '<html><body><strong>Test Email Body</strong>'
+                    || '<p>'
+                    || '<a href="' || mailgun_pkg.unsubscribe_link_tag || '">Unsubscribe</a>'
+                    || '</body></html>'
+    ,p_tag          => 'testtag2'
+    ,p_mail_headers => '{ "Importance" : "high"' -- high/normal/low
+                    || ', "Priority" : "urgent"' -- normal/urgent/non-urgent
+                    || ', "Sensitivity" : "confidential"' -- personal/private/confidential
+                    || ', "Expires" : "' || to_char(systimestamp + interval '7' day, 'Dy, dd Mon yyyy hh24:mi:ss tzh:tzm') || '"' -- expiry date/time
+                    || '}'
     );
 end;
 /

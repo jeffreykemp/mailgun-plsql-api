@@ -37,6 +37,7 @@ create type t_mailgun_email is object
   , subject        varchar2(4000)
   , message        clob
   , tag            varchar2(4000)
+  , mail_headers   varchar2(4000)
   , recipient      t_mailgun_recipient_arr
   , attachment     t_mailgun_attachment_arr
   );
