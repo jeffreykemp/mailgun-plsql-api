@@ -1,8 +1,4 @@
-drop type t_mailgun_email;
-drop type t_mailgun_attachment_arr;
-drop type t_mailgun_recipient_arr;
-drop type t_mailgun_attachment;
-drop type t_mailgun_recipient;
+-- types used by mailgun
 
 create type t_mailgun_recipient is object
   ( send_by    varchar2(3)
