@@ -6,6 +6,7 @@ create or replace package body mailgun_pkg is
   installation instructions and API reference.
 */
 
+-- TODO: remove calls to site_parameter prior to release
 g_public_api_key  varchar2(200) := site_parameter.get_value('MAILGUN_PUBLIC_KEY');
 g_private_api_key varchar2(200) := site_parameter.get_value('MAILGUN_SECRET_KEY');
 g_my_domain       varchar2(200) := site_parameter.get_value('MAILGUN_MY_DOMAIN');
