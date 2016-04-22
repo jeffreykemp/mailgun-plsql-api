@@ -1,28 +1,39 @@
 create or replace package body mailgun_pkg is
 /* mailgun API v0.4
   by Jeffrey Kemp
-
-  Refer to https://github.com/jeffreykemp/mailgun-plsql-api for detailed
-  installation instructions and API reference.
 */
 
 -- TODO: remove calls to site_parameter prior to release
-g_public_api_key  varchar2(200) := site_parameter.get_value('MAILGUN_PUBLIC_KEY');
-g_private_api_key varchar2(200) := site_parameter.get_value('MAILGUN_SECRET_KEY');
-g_my_domain       varchar2(200) := site_parameter.get_value('MAILGUN_MY_DOMAIN');
+g_public_api_key  varchar2(200) := site_parameter.get_value('MAILGUN_PUBLIC_KEY'); -- ''; --TODO: put your public API key here
+g_private_api_key varchar2(200) := site_parameter.get_value('MAILGUN_SECRET_KEY'); -- ''; --TODO: put your private API key here
+g_my_domain       varchar2(200) := site_parameter.get_value('MAILGUN_MY_DOMAIN'); -- ''; --TODO: put your domain here
 g_api_url         varchar2(200) := site_parameter.get_value('MAILGUN_API_URL'); --'https://api.mailgun.net/v3/';
-g_wallet_path     varchar2(1000);
-g_wallet_password varchar2(1000);
+g_wallet_path     varchar2(1000) := ''; --TODO: put your wallet path here
+g_wallet_password varchar2(1000) := ''; --TODO: put your wallet password here
+
+crlf              constant varchar2(50) := chr(13) || chr(10);
+boundary          constant varchar2(30) := '-----zdkgyl5aalom86symjq9y81s2jtorr';
+max_recipients    constant integer := 1000; -- mailgun limitation for recipient variables
+queue_name        constant varchar2(30) := 'mailgun_queue';
+queue_table       constant varchar2(30) := 'mailgun_queue_tab';
+job_name          constant varchar2(30) := 'mailgun_process_queue';
+payload_type      constant varchar2(30) := 't_mailgun_email';
+max_dequeue_count constant integer := 1000;
 
 -- if true, log all data sent to/from mailgun server
 g_verbose         boolean := false;
 
-crlf              constant varchar2(50) := chr(13) || chr(10);
-boundary          constant varchar2(30) := '-----v4np6rnptyb566a0y704sjeqv';
-max_recipients    constant integer := 1000; -- mailgun limitation for recipient variables
-
 g_recipient       t_mailgun_recipient_arr;
 g_attachment      t_mailgun_attachment_arr;
+
+e_no_queue_data exception;
+pragma exception_init (e_no_queue_data, -25228);
+
+/******************************************************************************
+**                                                                           **
+**                              PRIVATE METHODS                              **
+**                                                                           **
+******************************************************************************/
 
 procedure msg (p_msg in varchar2) is
 begin
@@ -36,26 +47,6 @@ begin
     raise_application_error(-20000, $$PLSQL_UNIT || ' assertion failed: ' || err);
   end if;
 end assert;
-
-procedure init
-  (p_public_api_key  in varchar2 := null
-  ,p_private_api_key in varchar2 := null
-  ,p_my_domain       in varchar2 := null
-  ,p_api_url         in varchar2 := null
-  ,p_wallet_path     in varchar2 := null
-  ,p_wallet_password in varchar2 := null
-  ) is
-begin
-  msg('init');
-  
-  g_public_api_key  := nvl(p_public_api_key,  g_public_api_key);
-  g_private_api_key := nvl(p_private_api_key, g_private_api_key);
-  g_my_domain       := nvl(p_my_domain,       g_my_domain);
-  g_api_url         := nvl(p_api_url,         g_api_url);
-  g_wallet_path     := nvl(p_wallet_path,     g_wallet_path);
-  g_wallet_password := nvl(p_wallet_password, g_wallet_password);
-
-end init;
 
 procedure log_headers (resp in out nocopy utl_http.resp) is
   name  varchar2(256);
@@ -139,53 +130,6 @@ begin
   return buf;
 end get_json;
 
-procedure validate_email
-  (p_address    in varchar2
-  ,p_is_valid   out boolean
-  ,p_suggestion out varchar2
-  ) is
-  str          varchar2(32767);
-  is_valid_str varchar2(100);
-begin
-  msg('validate_email ' || p_address);
-  
-  assert(g_public_api_key is not null, 'validate_email: your mailgun public API key not set');
-  assert(p_address is not null, 'validate_email: p_address cannot be null');
-  
-  str := get_json
-    (p_url    => g_api_url || 'address/validate'
-    ,p_params => 'address=' || apex_util.url_encode(p_address)
-    ,p_user   => 'api'
-    ,p_pwd    => g_public_api_key);
-  
-  apex_json.parse(str);
-
-  msg('address=' || apex_json.get_varchar2('address'));
-
-  is_valid_str := apex_json.get_varchar2('is_valid');
-  msg('is_valid_str=' || is_valid_str);
-  
-  p_is_valid := is_valid_str = 'true';
-
-  p_suggestion := apex_json.get_varchar2('did_you_mean');
-  msg('suggestion=' || p_suggestion);
-
-end validate_email;
-
-function email_is_valid (p_address in varchar2) return boolean is
-  is_valid   boolean;
-  suggestion varchar2(512);  
-begin
-  msg('email_is_valid ' || p_address);
-  
-  validate_email
-    (p_address    => p_address
-    ,p_is_valid   => is_valid
-    ,p_suggestion => suggestion);
-  
-  return is_valid;
-end email_is_valid;
-
 function rcpt_count return number is
 begin
   if g_recipient is not null then
@@ -201,6 +145,93 @@ begin
   end if;
   return 0;
 end attch_count;
+
+procedure add_recipient
+  (p_email      in varchar2
+  ,p_name       in varchar2
+  ,p_first_name in varchar2
+  ,p_last_name  in varchar2
+  ,p_id         in varchar2
+  ,p_send_by    in varchar2
+  ) is
+  name varchar2(4000);
+begin
+  msg('add_recipient ' || p_send_by || ': ' || p_name || ' <' || p_email || '> #' || p_id);
+  
+  assert(rcpt_count < max_recipients, 'maximum recipients per email exceeded (' || max_recipients || ')');
+  
+  assert(p_email is not null, 'add_recipient: p_email cannot be null');
+  assert(p_send_by is not null, 'add_recipient: p_send_by cannot be null');
+  assert(p_send_by in ('to','cc','bcc'), 'p_send_by must be to/cc/bcc');
+  
+  name := nvl(p_name, trim(p_first_name || ' ' || p_last_name));
+
+  if g_recipient is null then
+    g_recipient := t_mailgun_recipient_arr();
+  end if;
+  g_recipient.extend(1);
+  g_recipient(g_recipient.last) := t_mailgun_recipient
+    ( send_by     => p_send_by
+    , email_spec  => case when p_email like '% <%>'
+                     then p_email
+                     else nvl(name, p_email) || ' <' || p_email || '>'
+                     end
+    , email       => case when p_email like '% <%>'
+                     then rtrim(ltrim(regexp_substr(p_email, '<.*>', 1, 1), '<'), '>')
+                     else p_email
+                     end
+    , name        => name
+    , first_name  => p_first_name
+    , last_name   => p_last_name
+    , id          => p_id
+    );
+
+end add_recipient;
+
+function attachment_header
+  (p_file_name    in varchar2
+  ,p_content_type in varchar2
+  ,p_inline       in boolean
+  ) return varchar2 is
+begin
+
+  assert(p_file_name is not null, 'attachment_header: p_file_name cannot be null');
+  assert(p_content_type is not null, 'attachment_header: p_content_type cannot be null');
+
+  return '--' || boundary || crlf
+    || 'Content-Disposition: form-data; name="'
+    || case when p_inline then 'inline' else 'attachment' end
+    || '"; filename="' || p_file_name || '"' || crlf
+    || 'Content-Type: ' || p_content_type || crlf
+    || crlf;
+
+end attachment_header;
+
+procedure add_attachment
+  (p_file_name    in varchar2
+  ,p_blob_content in blob := null
+  ,p_clob_content in clob := null
+  ,p_content_type in varchar2
+  ,p_inline       in boolean
+  ) is
+begin
+  msg('add_attachment ' || p_file_name);
+
+  if g_attachment is null then
+    g_attachment := t_mailgun_attachment_arr();
+  end if;
+  g_attachment.extend(1);
+  g_attachment(g_attachment.last) := t_mailgun_attachment
+    ( file_name     => p_file_name
+    , blob_content  => p_blob_content
+    , clob_content  => p_clob_content
+    , header        => attachment_header
+        (p_file_name    => p_file_name
+        ,p_content_type => p_content_type
+        ,p_inline       => p_inline)
+    );
+
+end add_attachment;
 
 function field_header (tag in varchar2) return varchar2 is
 begin
@@ -593,23 +624,82 @@ exception
     raise;
 end send_email;
 
-function get_payload
-  (p_from_name      in varchar2
-  ,p_from_email     in varchar2
-  ,p_reply_to       in varchar2
-  ,p_to_name        in varchar2
-  ,p_to_email       in varchar2
-  ,p_cc             in varchar2
-  ,p_bcc            in varchar2
-  ,p_subject        in varchar2
-  ,p_message        in clob
-  ,p_tag            in varchar2
-  ,p_mail_headers   in varchar2
-  ) return t_mailgun_email is
-  payload t_mailgun_email;
+/******************************************************************************
+**                                                                           **
+**                              PUBLIC METHODS                               **
+**                                                                           **
+******************************************************************************/
+
+procedure validate_email
+  (p_address    in varchar2
+  ,p_is_valid   out boolean
+  ,p_suggestion out varchar2
+  ) is
+  str          varchar2(32767);
+  is_valid_str varchar2(100);
 begin
-  msg('get_payload');
+  msg('validate_email ' || p_address);
   
+  assert(g_public_api_key is not null, 'validate_email: your mailgun public API key not set');
+  assert(p_address is not null, 'validate_email: p_address cannot be null');
+  
+  str := get_json
+    (p_url    => g_api_url || 'address/validate'
+    ,p_params => 'address=' || apex_util.url_encode(p_address)
+    ,p_user   => 'api'
+    ,p_pwd    => g_public_api_key);
+  
+  apex_json.parse(str);
+
+  msg('address=' || apex_json.get_varchar2('address'));
+
+  is_valid_str := apex_json.get_varchar2('is_valid');
+  msg('is_valid_str=' || is_valid_str);
+  
+  p_is_valid := is_valid_str = 'true';
+
+  p_suggestion := apex_json.get_varchar2('did_you_mean');
+  msg('suggestion=' || p_suggestion);
+
+end validate_email;
+
+function email_is_valid (p_address in varchar2) return boolean is
+  is_valid   boolean;
+  suggestion varchar2(512);  
+begin
+  msg('email_is_valid ' || p_address);
+  
+  validate_email
+    (p_address    => p_address
+    ,p_is_valid   => is_valid
+    ,p_suggestion => suggestion);
+  
+  return is_valid;
+end email_is_valid;
+
+procedure send_email
+  (p_from_name    in varchar2  := null
+  ,p_from_email   in varchar2
+  ,p_reply_to     in varchar2  := null
+  ,p_to_name      in varchar2  := null
+  ,p_to_email     in varchar2  := null             -- optional if the send_xx have been called already
+  ,p_cc           in varchar2  := null
+  ,p_bcc          in varchar2  := null
+  ,p_subject      in varchar2
+  ,p_message      in clob                          -- html allowed
+  ,p_tag          in varchar2  := null
+  ,p_mail_headers in varchar2  := null             -- json structure of tag/value pairs
+  ,p_priority     in number    := priority_default -- lower numbers are processed first
+  ) is
+  enq_opts        dbms_aq.enqueue_options_t;
+  enq_msg_props   dbms_aq.message_properties_t;
+  payload         t_mailgun_email;
+  msgid           raw(16);
+begin
+  msg('send_email ' || p_to_email || ' "' || p_subject || '"');
+  
+  assert(g_private_api_key is not null, 'send_email: your mailgun private API key not set');
+  assert(g_my_domain is not null, 'send_email: your mailgun domain not set');
   assert(p_from_email is not null, 'send_email: p_from_email cannot be null');
 
   if p_to_email is not null then
@@ -636,53 +726,19 @@ begin
     );
 
   reset;
-  
-  msg('get_payload finished');
-  return payload;
-exception
-  when others then
-    reset;
-    raise;
-end get_payload;
 
-procedure send_email
-  (p_from_name      in varchar2 := null
-  ,p_from_email     in varchar2
-  ,p_reply_to       in varchar2 := null
-  ,p_to_name        in varchar2 := null
-  ,p_to_email       in varchar2 := null
-  ,p_cc             in varchar2 := null
-  ,p_bcc            in varchar2 := null
-  ,p_subject        in varchar2
-  ,p_message        in clob
-  ,p_tag            in varchar2 := null
-  ,p_mail_headers   in varchar2 := null
-  ) is
-  enq_opts        dbms_aq.enqueue_options_t;
-  enq_msg_props   dbms_aq.message_properties_t;
-  payload         t_mailgun_email;
-  msgid           raw(16);
-begin
-  msg('send_email ' || p_to_email || ' "' || p_subject || '"');
-  
-  assert(g_private_api_key is not null, 'send_email: your mailgun private API key not set');
-  assert(g_my_domain is not null, 'send_email: your mailgun domain not set');
-  
-  payload := get_payload
-    ( p_from_name    => p_from_name
-    , p_from_email   => p_from_email
-    , p_reply_to     => p_reply_to
-    , p_to_name      => p_to_name
-    , p_to_email     => p_to_email
-    , p_cc           => p_cc
-    , p_bcc          => p_bcc
-    , p_subject      => p_subject
-    , p_message      => p_message
-    , p_tag          => p_tag
-    , p_mail_headers => p_mail_headers
+  enq_msg_props.expiration := 6 * 60 * 60; -- expire after 6 hours
+  enq_msg_props.priority   := p_priority;
+
+  dbms_aq.enqueue
+    (queue_name         => user||'.'||queue_name
+    ,enqueue_options    => enq_opts
+    ,message_properties => enq_msg_props
+    ,payload            => payload
+    ,msgid              => msgid
     );
-
-  send_email(p_payload => payload);
+  
+  msg('email queued ' || msgid);
   
   msg('send_email finished');
 exception
@@ -692,48 +748,6 @@ exception
     msg(dbms_utility.format_error_backtrace);
     raise;
 end send_email;
-
-procedure add_recipient
-  (p_email      in varchar2
-  ,p_name       in varchar2
-  ,p_first_name in varchar2
-  ,p_last_name  in varchar2
-  ,p_id         in varchar2
-  ,p_send_by    in varchar2
-  ) is
-  name varchar2(4000);
-begin
-  msg('add_recipient ' || p_send_by || ': ' || p_name || ' <' || p_email || '> #' || p_id);
-  
-  assert(rcpt_count < max_recipients, 'maximum recipients per email exceeded (' || max_recipients || ')');
-  
-  assert(p_email is not null, 'add_recipient: p_email cannot be null');
-  assert(p_send_by is not null, 'add_recipient: p_send_by cannot be null');
-  assert(p_send_by in ('to','cc','bcc'), 'p_send_by must be to/cc/bcc');
-  
-  name := nvl(p_name, trim(p_first_name || ' ' || p_last_name));
-
-  if g_recipient is null then
-    g_recipient := t_mailgun_recipient_arr();
-  end if;
-  g_recipient.extend(1);
-  g_recipient(g_recipient.last) := t_mailgun_recipient
-    ( send_by     => p_send_by
-    , email_spec  => case when p_email like '% <%>'
-                     then p_email
-                     else nvl(name, p_email) || ' <' || p_email || '>'
-                     end
-    , email       => case when p_email like '% <%>'
-                     then rtrim(ltrim(regexp_substr(p_email, '<.*>', 1, 1), '<'), '>')
-                     else p_email
-                     end
-    , name        => name
-    , first_name  => p_first_name
-    , last_name   => p_last_name
-    , id          => p_id
-    );
-
-end add_recipient;
 
 procedure send_to
   (p_email      in varchar2
@@ -787,25 +801,6 @@ begin
     ,p_send_by    => 'bcc');
 end send_bcc;
 
-function attachment_header
-  (p_file_name    in varchar2
-  ,p_content_type in varchar2
-  ,p_inline       in boolean
-  ) return varchar2 is
-begin
-
-  assert(p_file_name is not null, 'attachment_header: p_file_name cannot be null');
-  assert(p_content_type is not null, 'attachment_header: p_content_type cannot be null');
-
-  return '--' || boundary || crlf
-    || 'Content-Disposition: form-data; name="'
-    || case when p_inline then 'inline' else 'attachment' end
-    || '"; filename="' || p_file_name || '"' || crlf
-    || 'Content-Type: ' || p_content_type || crlf
-    || crlf;
-
-end attachment_header;
-
 procedure attach
   (p_file_content in blob
   ,p_file_name    in varchar2
@@ -817,18 +812,11 @@ begin
   
   assert(p_file_content is not null, 'attach(blob): p_file_content cannot be null');
   
-  if g_attachment is null then
-    g_attachment := t_mailgun_attachment_arr();
-  end if;
-  g_attachment.extend(1);
-  g_attachment(g_attachment.last) := t_mailgun_attachment
-    ( file_name     => p_file_name
-    , blob_content  => p_file_content
-    , clob_content  => null
-    , header        => attachment_header
-        (p_file_name    => p_file_name
-        ,p_content_type => p_content_type
-        ,p_inline       => p_inline)
+  add_attachment
+    (p_file_name    => p_file_name
+    ,p_blob_content => p_file_content
+    ,p_content_type => p_content_type
+    ,p_inline       => p_inline
     );
   
 end attach;
@@ -843,19 +831,12 @@ begin
   msg('attach(clob) ' || p_file_name);
 
   assert(p_file_content is not null, 'attach(clob): p_file_content cannot be null');
-  
-  if g_attachment is null then
-    g_attachment := t_mailgun_attachment_arr();
-  end if;
-  g_attachment.extend(1);
-  g_attachment(g_attachment.last) := t_mailgun_attachment
-    ( file_name     => p_file_name
-    , blob_content  => null
-    , clob_content  => p_file_content
-    , header        => attachment_header
-        (p_file_name    => p_file_name
-        ,p_content_type => p_content_type
-        ,p_inline       => p_inline)
+
+  add_attachment
+    (p_file_name    => p_file_name
+    ,p_clob_content => p_file_content
+    ,p_content_type => p_content_type
+    ,p_inline       => p_inline
     );
   
 end attach;
@@ -873,6 +854,138 @@ begin
   end if;
 
 end reset;
+
+procedure create_queue is
+begin
+  msg('create_queue ' || queue_name);
+
+  dbms_aqadm.create_queue_table
+    (queue_table        => user||'.'||queue_table
+    ,queue_payload_type => user||'.'||payload_type
+    ,sort_list          => 'priority,enq_time'
+    ,storage_clause     => 'nested table user_data.recipient store as mailgun_recipient_tab'
+                        ||',nested table user_data.attachment store as mailgun_attachment_tab'
+    );
+
+  dbms_aqadm.create_queue
+    (queue_name     =>  user||'.'||queue_name
+    ,queue_table    =>  user||'.'||queue_table
+    ,max_retries    =>  60 --allow failures before giving up on a message
+    ,retry_delay    =>  10 --wait seconds before trying this message again
+    );
+
+  dbms_aqadm.start_queue (user||'.'||queue_name);
+
+end create_queue;
+
+procedure drop_queue is
+begin
+  msg('drop_queue ' || queue_name);
+  
+  dbms_aqadm.stop_queue (user||'.'||queue_name);
+  
+  dbms_aqadm.drop_queue (user||'.'||queue_name);
+  
+  dbms_aqadm.drop_queue_table (user||'.'||queue_table);  
+
+end drop_queue;
+
+procedure purge_queue is
+  r_opt dbms_aqadm.aq$_purge_options_t;
+begin
+  msg('purge_queue ' || queue_table);
+
+  dbms_aqadm.purge_queue_table
+    (queue_table     => user||'.'||queue_table
+    ,purge_condition => q'[ qtview.msg_state = 'EXPIRED' ]'
+    ,purge_options   => r_opt);
+
+end purge_queue;
+
+procedure push_queue as
+  r_dequeue_options    dbms_aq.dequeue_options_t;
+  r_message_properties dbms_aq.message_properties_t;
+  msgid                raw(16);
+  payload              t_mailgun_email;
+  dequeue_count        integer := 0;
+begin
+  msg('push_queue');
+  
+  -- commit any emails requested in the current session
+  commit;
+  
+  r_dequeue_options.wait := dbms_aq.no_wait;
+
+  -- loop through all messages in the queue until there is none
+  -- exit this loop when the e_no_queue_data exception is raised.
+  loop    
+
+    dbms_aq.dequeue
+      (queue_name         => user||'.'||queue_name
+      ,dequeue_options    => r_dequeue_options
+      ,message_properties => r_message_properties
+      ,payload            => payload
+      ,msgid              => msgid
+      );
+
+    -- process the message
+    send_email (p_payload => payload);  
+
+    commit; -- the queue will treat the message as succeeded
+    
+    -- don't bite off everything in one go
+    dequeue_count := dequeue_count + 1;    
+    exit when dequeue_count >= max_dequeue_count;
+  end loop;
+
+exception
+  when e_no_queue_data then
+    msg('push_queue finished');
+  when others then
+    rollback; -- the queue will treat the message as failed
+    msg(sqlerrm);
+    msg(dbms_utility.format_error_stack);
+    msg(dbms_utility.format_error_backtrace);
+    raise;
+end push_queue;
+
+procedure create_job
+  (p_repeat_interval in varchar2 := repeat_interval_default) is
+begin
+  msg('create_job ' || job_name);
+  
+  assert(p_repeat_interval is not null, 'create_job: p_repeat_interval cannot be null');
+
+  dbms_scheduler.create_job
+    (job_name        => job_name
+    ,job_type        => 'stored_procedure'
+    ,job_action      => $$PLSQL_UNIT||'.push_queue'
+    ,start_date      => systimestamp
+    ,repeat_interval => p_repeat_interval
+    );
+
+  dbms_scheduler.set_attribute(job_name,'restartable',true);
+
+  dbms_scheduler.enable(job_name);
+
+end create_job;
+
+procedure drop_job is
+begin
+  msg('drop_job ' || job_name);
+
+  begin
+    dbms_scheduler.stop_job (job_name);
+  exception
+    when others then
+      if sqlcode != -27366 /*job already stopped*/ then
+        raise;
+      end if;
+  end;
+  
+  dbms_scheduler.drop_job (job_name);
+
+end drop_job;
 
 procedure verbose (p_on in boolean := true) is
 begin

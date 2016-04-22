@@ -1,3 +1,5 @@
+prompt create_tables.sql
+
 -- table to record logs of sent/attempted emails
 create table mailgun_email_log
   ( requested_ts    timestamp

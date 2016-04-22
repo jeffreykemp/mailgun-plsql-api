@@ -1,3 +1,5 @@
+prompt create_types.sql
+
 -- types used by mailgun
 
 create type t_mailgun_recipient is object
