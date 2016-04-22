@@ -7,6 +7,7 @@ create or replace package mailgun_aq_pkg is
 
   * Grants to Oracle packages required:
   
+    grant create job to myschema;
     grant execute on dbms_aq to myschema;
     grant execute on dbms_aqadm to myschema;
     grant execute on dbms_scheduler to myschema;
