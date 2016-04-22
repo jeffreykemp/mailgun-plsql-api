@@ -13,7 +13,7 @@ end;
 -- send a simple email
 begin
   mailgun_aq_pkg.send_email
-    (p_from_email => 'Mr Sender <sender@host.com>'
+    (p_from_email => 'Mr Sender <sender@example.com>'
     ,p_to_email   => 'Ms Recipient <recipient@example.com>'
     ,p_subject    => 'test subject ' || to_char(systimestamp,'DD/MM/YYYY HH24:MI:SS.FF')
     ,p_message    => 'Test Email Body'
@@ -38,8 +38,8 @@ end;
 begin
   mailgun_aq_pkg.send_email
     (p_from_name  => 'Mr Sender'
-    ,p_from_email => 'sender@host.com'
-    ,p_reply_to   => 'reply@host.com'
+    ,p_from_email => 'sender@example.com'
+    ,p_reply_to   => 'reply@example.com'
     ,p_to_name    => 'Mr Recipient'
     ,p_to_email   => 'recipient@example.com'
     ,p_cc         => 'Mrs CC <cc@example.com>'
@@ -65,7 +65,7 @@ begin
   mailgun_pkg.send_cc('cc@example.com');
   mailgun_pkg.send_bcc('bcc@example.com','Mr Bcc');
   mailgun_aq_pkg.send_email
-    (p_from_email => 'Mr Sender <sender@host.com>'
+    (p_from_email => 'Mr Sender <sender@example.com>'
     ,p_subject    => 'test subject ' || to_char(systimestamp,'DD/MM/YYYY HH24:MI:SS.FF')
     ,p_message    => 'Hi ' || mailgun_pkg.recipient_first_name || ','
                   || '<p>'
@@ -119,7 +119,7 @@ begin
     ,p_inline       => true);
 
   mailgun_aq_pkg.send_email
-    (p_from_email => 'Mr Sender <sender@host.com>'
+    (p_from_email => 'Mr Sender <sender@example.com>'
     ,p_to_email   => 'Mrs Recipient <recipient@example.com>'
     ,p_subject    => 'test subject ' || to_char(systimestamp,'DD/MM/YYYY HH24:MI:SS.FF')
     ,p_message    => '<html><body><strong>Test Email Body</strong>'
