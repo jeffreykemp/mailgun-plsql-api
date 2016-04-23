@@ -13,10 +13,10 @@ g_wallet_password varchar2(1000) := ''; --TODO: put your wallet password here
 crlf              constant varchar2(50) := chr(13) || chr(10);
 boundary          constant varchar2(100) := '-----zdkgyl5aalom86symjq9y81s2jtorr';
 max_recipients    constant integer := 1000; -- mailgun limitation for recipient variables
-queue_name        constant varchar2(30) := 'mailgun_queue';
-queue_table       constant varchar2(30) := 'mailgun_queue_tab';
+queue_name        constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue';
+queue_table       constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue_tab';
 job_name          constant varchar2(30) := 'mailgun_process_queue';
-payload_type      constant varchar2(30) := 't_mailgun_email';
+payload_type      constant varchar2(30) := sys_context('userenv','current_schema')||'.t_mailgun_email';
 max_dequeue_count constant integer := 1000;
 
 -- if true, log all data sent to/from mailgun server
@@ -730,7 +730,7 @@ begin
   enq_msg_props.priority   := p_priority;
 
   dbms_aq.enqueue
-    (queue_name         => user||'.'||queue_name
+    (queue_name         => queue_name
     ,enqueue_options    => enq_opts
     ,message_properties => enq_msg_props
     ,payload            => payload
@@ -859,21 +859,21 @@ begin
   msg('create_queue ' || queue_name);
 
   dbms_aqadm.create_queue_table
-    (queue_table        => user||'.'||queue_table
-    ,queue_payload_type => user||'.'||payload_type
+    (queue_table        => queue_table
+    ,queue_payload_type => payload_type
     ,sort_list          => 'priority,enq_time'
     ,storage_clause     => 'nested table user_data.recipient store as mailgun_recipient_tab'
                         ||',nested table user_data.attachment store as mailgun_attachment_tab'
     );
 
   dbms_aqadm.create_queue
-    (queue_name     =>  user||'.'||queue_name
-    ,queue_table    =>  user||'.'||queue_table
+    (queue_name     =>  queue_name
+    ,queue_table    =>  queue_table
     ,max_retries    =>  60 --allow failures before giving up on a message
     ,retry_delay    =>  10 --wait seconds before trying this message again
     );
 
-  dbms_aqadm.start_queue (user||'.'||queue_name);
+  dbms_aqadm.start_queue (queue_name);
 
 end create_queue;
 
@@ -881,11 +881,11 @@ procedure drop_queue is
 begin
   msg('drop_queue ' || queue_name);
   
-  dbms_aqadm.stop_queue (user||'.'||queue_name);
+  dbms_aqadm.stop_queue (queue_name);
   
-  dbms_aqadm.drop_queue (user||'.'||queue_name);
+  dbms_aqadm.drop_queue (queue_name);
   
-  dbms_aqadm.drop_queue_table (user||'.'||queue_table);  
+  dbms_aqadm.drop_queue_table (queue_table);  
 
 end drop_queue;
 
@@ -895,7 +895,7 @@ begin
   msg('purge_queue ' || queue_table);
 
   dbms_aqadm.purge_queue_table
-    (queue_table     => user||'.'||queue_table
+    (queue_table     => queue_table
     ,purge_condition => q'[ qtview.msg_state = 'EXPIRED' ]'
     ,purge_options   => r_opt);
 
@@ -920,7 +920,7 @@ begin
   loop    
 
     dbms_aq.dequeue
-      (queue_name         => user||'.'||queue_name
+      (queue_name         => queue_name
       ,dequeue_options    => r_dequeue_options
       ,message_properties => r_message_properties
       ,payload            => payload
