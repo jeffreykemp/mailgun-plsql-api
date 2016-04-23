@@ -70,7 +70,7 @@ begin
     ,p_mail_headers => '{ "Importance" : "high"' -- high/normal/low
                     || ', "Priority" : "urgent"' -- normal/urgent/non-urgent
                     || ', "Sensitivity" : "confidential"' -- personal/private/confidential
-                    || ', "Expires" : "' || to_char(systimestamp + interval '7' day, 'Dy, dd Mon yyyy hh24:mi:ss tzh:tzm') || '"' -- expiry date/time
+                    || ', "Expires" : "' || to_char(systimestamp + interval '7' day,mailgun_pkg.datetime_format) || '"'
                     || '}'
     ,p_priority     => 1
     );

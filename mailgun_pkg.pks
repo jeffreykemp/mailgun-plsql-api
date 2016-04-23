@@ -82,6 +82,9 @@ priority_default        constant integer := 3;
 -- default job frequency
 repeat_interval_default constant varchar2(200) := 'FREQ=MINUTELY;INTERVAL=5;';
 
+-- mail datetime format
+datetime_format         constant varchar2(100) := 'Dy, dd Mon yyyy hh24:mi:ss tzh:tzm';
+
 -- validate_email: validate an email address (procedure version)
 --   p_address:    email address to validate
 --   p_is_valid:   true if the email address appears to be valid
