@@ -31,5 +31,4 @@ prompt list mailgun scheduler jobs
 select job_name, 'enabled='||enabled status, job_action, repeat_interval from user_scheduler_jobs where job_name like '%MAILGUN%';
 
 prompt finished.
-spool off
 set feedback on heading on
