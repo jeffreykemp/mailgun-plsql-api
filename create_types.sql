@@ -1,6 +1,5 @@
 prompt create_types.sql
-
--- types used by mailgun
+-- types used by mailgun v0.4
 
 create type t_mailgun_recipient is object
   ( send_by    varchar2(3)

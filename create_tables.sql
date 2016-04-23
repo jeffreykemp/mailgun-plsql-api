@@ -1,4 +1,5 @@
 prompt create_tables.sql
+-- tables for mailgun v0.4
 
 -- table to record logs of sent/attempted emails
 create table mailgun_email_log
