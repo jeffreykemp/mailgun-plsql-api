@@ -12,7 +12,7 @@ g_wallet_path     varchar2(1000) := ''; --TODO: put your wallet path here
 g_wallet_password varchar2(1000) := ''; --TODO: put your wallet password here
 
 crlf              constant varchar2(50) := chr(13) || chr(10);
-boundary          constant varchar2(30) := '-----zdkgyl5aalom86symjq9y81s2jtorr';
+boundary          constant varchar2(100) := '-----zdkgyl5aalom86symjq9y81s2jtorr';
 max_recipients    constant integer := 1000; -- mailgun limitation for recipient variables
 queue_name        constant varchar2(30) := 'mailgun_queue';
 queue_table       constant varchar2(30) := 'mailgun_queue_tab';
