@@ -1,11 +1,5 @@
 prompt install.sql
-
-column fn new_value logfile noprint
-select user||'_'||to_char(sysdate,'yyyymmdd"_"hh24miss')||'_'||global_name as fn from global_name;
-prompt spooling to _install_mailgun_&logfile..log
-spool _install_mailgun_&logfile..log
-
-prompt installing mailgun v0.4
+prompt mailgun v0.4
 -- run this script in the schema in which you wish the objects to be installed.
 
 @create_tables.sql

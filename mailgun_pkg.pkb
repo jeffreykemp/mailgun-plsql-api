@@ -3,11 +3,10 @@ create or replace package body mailgun_pkg is
   by Jeffrey Kemp
 */
 
--- TODO: remove calls to site_parameter prior to release
-g_public_api_key  varchar2(200) := site_parameter.get_value('MAILGUN_PUBLIC_KEY'); -- ''; --TODO: put your public API key here
-g_private_api_key varchar2(200) := site_parameter.get_value('MAILGUN_SECRET_KEY'); -- ''; --TODO: put your private API key here
-g_my_domain       varchar2(200) := site_parameter.get_value('MAILGUN_MY_DOMAIN'); -- ''; --TODO: put your domain here
-g_api_url         varchar2(200) := site_parameter.get_value('MAILGUN_API_URL'); --'https://api.mailgun.net/v3/';
+g_public_api_key  varchar2(200) := ''; --TODO: put your public API key here
+g_private_api_key varchar2(200) := ''; --TODO: put your private API key here
+g_my_domain       varchar2(200) := ''; --TODO: put your domain here
+g_api_url         varchar2(200) := 'https://api.mailgun.net/v3/';
 g_wallet_path     varchar2(1000) := ''; --TODO: put your wallet path here
 g_wallet_password varchar2(1000) := ''; --TODO: put your wallet password here
 
@@ -808,7 +807,7 @@ procedure attach
   ,p_inline       in boolean := false
   ) is
 begin
-  msg('attach(blob) ' || p_file_name);
+  msg('attach(blob) ' || p_file_name || ' ' || dbms_lob.getlength(p_file_content) || ' bytes');
   
   assert(p_file_content is not null, 'attach(blob): p_file_content cannot be null');
   
@@ -828,7 +827,7 @@ procedure attach
   ,p_inline       in boolean := false
   ) is
 begin
-  msg('attach(clob) ' || p_file_name);
+  msg('attach(clob) ' || p_file_name || ' ' || dbms_lob.getlength(p_file_content) || ' bytes');
 
   assert(p_file_content is not null, 'attach(clob): p_file_content cannot be null');
 
@@ -927,6 +926,10 @@ begin
       ,payload            => payload
       ,msgid              => msgid
       );
+    
+    msg('payload priority: ' || r_message_properties.priority
+      || ' enqeued: ' || to_char(r_message_properties.enqueue_time,'dd/mm/yyyy hh24:mi:ss')
+      || ' attempts: ' || r_message_properties.attempts);
 
     -- process the message
     send_email (p_payload => payload);  
@@ -934,13 +937,13 @@ begin
     commit; -- the queue will treat the message as succeeded
     
     -- don't bite off everything in one go
-    dequeue_count := dequeue_count + 1;    
+    dequeue_count := dequeue_count + 1;
     exit when dequeue_count >= max_dequeue_count;
   end loop;
 
 exception
   when e_no_queue_data then
-    msg('push_queue finished');
+    msg('push_queue finished count=' || dequeue_count);
   when others then
     rollback; -- the queue will treat the message as failed
     msg(sqlerrm);
