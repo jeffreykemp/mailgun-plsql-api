@@ -3,12 +3,12 @@ create or replace package body mailgun_pkg is
   by Jeffrey Kemp
 */
 
-g_public_api_key  varchar2(200) := ''; --TODO: put your public API key here
-g_private_api_key varchar2(200) := ''; --TODO: put your private API key here
-g_my_domain       varchar2(200) := ''; --TODO: put your domain here
-g_api_url         varchar2(200) := 'https://api.mailgun.net/v3/';
-g_wallet_path     varchar2(1000) := ''; --TODO: put your wallet path here
-g_wallet_password varchar2(1000) := ''; --TODO: put your wallet password here
+g_public_api_key  constant varchar2(200) := ''; --TODO: put your public API key here
+g_private_api_key constant varchar2(200) := ''; --TODO: put your private API key here
+g_my_domain       constant varchar2(200) := ''; --TODO: put your domain here
+g_api_url         constant varchar2(200) := 'https://api.mailgun.net/v3/'; --TODO: change this if you are using reverse proxy method
+g_wallet_path     constant varchar2(1000) := ''; --TODO: put your wallet path here if using Oracle wallet
+g_wallet_password constant varchar2(1000) := ''; --TODO: put your wallet password here if using Oracle wallet
 
 crlf              constant varchar2(50) := chr(13) || chr(10);
 boundary          constant varchar2(100) := '-----zdkgyl5aalom86symjq9y81s2jtorr';
