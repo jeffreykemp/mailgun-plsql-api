@@ -1,5 +1,5 @@
 create or replace package mailgun_pkg is
-/* mailgun API v0.4
+/* mailgun API v0.4.2
   by Jeffrey Kemp
   
   Refer to https://github.com/jeffreykemp/mailgun-plsql-api for detailed
@@ -84,6 +84,9 @@ repeat_interval_default constant varchar2(200) := 'FREQ=MINUTELY;INTERVAL=5;';
 
 -- mail datetime format
 datetime_format         constant varchar2(100) := 'Dy, dd Mon yyyy hh24:mi:ss tzh:tzm';
+
+-- copy of utl_tcp.crlf for convenience
+crlf                    constant varchar2(2) := chr(13) || chr(10);
 
 -- validate_email: validate an email address (procedure version)
 --   p_address:    email address to validate

@@ -1,17 +1,19 @@
 create or replace package body mailgun_pkg is
-/* mailgun API v0.4
+/* mailgun API v0.4.2
   by Jeffrey Kemp
 */
 
-g_public_api_key  constant varchar2(200) := ''; --TODO: put your public API key here
-g_private_api_key constant varchar2(200) := ''; --TODO: put your private API key here
-g_my_domain       constant varchar2(200) := ''; --TODO: put your domain here
+-- If you get "PLS-00322: declaration of a constant 'x' must contain an initialization assignment",
+-- it's probably because you forgot to edit the constants below.
+
+g_public_api_key  constant varchar2(200) /*:= 'TODO: put your public API key here' */;
+g_private_api_key constant varchar2(200) /*:= 'TODO: put your private API key here' */;
+g_my_domain       constant varchar2(200) /*:= 'TODO: put your domain here' */;
 g_api_url         constant varchar2(200) := 'https://api.mailgun.net/v3/'; --TODO: change this if you are using reverse proxy method
 g_wallet_path     constant varchar2(1000) := ''; --TODO: put your wallet path here if using Oracle wallet
 g_wallet_password constant varchar2(1000) := ''; --TODO: put your wallet password here if using Oracle wallet
 
-crlf              constant varchar2(50) := chr(13) || chr(10);
-boundary          constant varchar2(100) := '-----zdkgyl5aalom86symjq9y81s2jtorr';
+boundary          constant varchar2(100) := '-----n8vtmn6973vyrnsw1agnxs7gzc4e1r';
 max_recipients    constant integer := 1000; -- mailgun limitation for recipient variables
 queue_name        constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue';
 queue_table       constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue_tab';
@@ -162,6 +164,10 @@ begin
   assert(p_email is not null, 'add_recipient: p_email cannot be null');
   assert(p_send_by is not null, 'add_recipient: p_send_by cannot be null');
   assert(p_send_by in ('to','cc','bcc'), 'p_send_by must be to/cc/bcc');
+
+  -- don't allow a list of email addresses in one call
+  assert(instr(p_email,',')=0, 'add_recipient: p_email cannot contain commas (,)');
+  assert(instr(p_email,';')=0, 'add_recipient: p_email cannot contain semicolons (;)');
   
   name := nvl(p_name, trim(p_first_name || ' ' || p_last_name));
 
@@ -362,7 +368,6 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
   resp             utl_http.resp;
   my_scheme        varchar2(256);
   my_realm         varchar2(256);
-  buf              varchar2(32767);
   attachment_size  integer;
   resp_text        varchar2(32767);
   recipient_count  integer := 0;
@@ -370,13 +375,15 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
   log              mailgun_email_log%rowtype;
 
   procedure append_recipient (rcpt_list in out varchar2, r in t_mailgun_recipient) is
-  begin
-    
+  begin    
     if rcpt_list is not null then
-      rcpt_list := rcpt_list || ', ';
+      rcpt_list := rcpt_list || ',';
     end if;
     rcpt_list := rcpt_list || r.email_spec;
-    
+  end append_recipient;
+  
+  procedure add_recipient_variable (r in t_mailgun_recipient) is
+  begin    
     apex_json.open_object(r.email);
     apex_json.write('email',      r.email);
     apex_json.write('name',       r.name);
@@ -384,8 +391,12 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
     apex_json.write('last_name',  r.last_name);
     apex_json.write('id',         r.id);
     apex_json.close_object;
-
-  end append_recipient;
+  end add_recipient_variable;
+  
+  procedure append_header (buf in varchar2) is
+  begin
+    dbms_lob.writeappend(header, length(buf), buf);
+  end append_header;
   
   procedure log_response is
     -- needs to commit the log entry independently of calling transaction
@@ -446,72 +457,79 @@ begin
 
   if p_payload.to_email is not null then
     assert(recipient_count = 0, 'cannot mix multiple recipients with to_email parameter');
-    if p_payload.to_email like '% <%>%' then
-      recipients_to := p_payload.to_email;
-    else
+
+    if p_payload.to_name is not null 
+    and p_payload.to_email not like '% <%>%'
+    and instr(p_payload.to_email, ',') = 0
+    and instr(p_payload.to_email, ';') = 0 then
+      -- to_email is just a single, simple email address, and we have a to_name
       recipients_to := nvl(p_payload.to_name, p_payload.to_email) || ' <' || p_payload.to_email || '>';
+    else
+      -- to_email is a formatted name+email, or a list, or we don't have any to_name
+      recipients_to := replace(p_payload.to_email, ';', ',');
     end if;
+
   end if;
 
-  recipients_cc  := p_payload.cc;
-  recipients_bcc := p_payload.bcc;
+  recipients_cc  := replace(p_payload.cc, ';', ',');
+  recipients_bcc := replace(p_payload.bcc, ';', ',');
   
-  begin    
-    apex_json.initialize_clob_output;
-    apex_json.open_object;
+  if recipient_count > 0 then
+    for i in 1..recipient_count loop
+      -- construct the comma-delimited recipient lists
+      case p_payload.recipient(i).send_by
+      when 'to'  then
+        append_recipient(recipients_to, p_payload.recipient(i));          
+      when 'cc'  then
+        append_recipient(recipients_cc, p_payload.recipient(i));
+      when 'bcc' then
+        append_recipient(recipients_bcc, p_payload.recipient(i));
+      end case;
+    end loop;
+  end if;
+  
+  assert(recipients_to is not null, 'send_email: recipients list cannot be empty');
+  
+  dbms_lob.createtemporary(header, false, dbms_lob.call);
+
+  append_header(crlf
+    || form_field('from', sender)
+    || form_field('h:Reply-To', p_payload.reply_to)
+    || form_field('to', recipients_to)
+    || form_field('cc', recipients_cc)
+    || form_field('bcc', recipients_bcc)
+    || form_field('o:tag', p_payload.tag)
+    || form_field('subject', p_payload.subject)
+    );
     
-    if recipient_count > 0 then
+  if recipient_count > 0 then
+    begin
+      -- construct the recipient variables json object
+      apex_json.initialize_clob_output;
+      apex_json.open_object;  
       for i in 1..recipient_count loop
+        add_recipient_variable(p_payload.recipient(i));
+      end loop;      
+      apex_json.close_object;
 
-        case p_payload.recipient(i).send_by
-        when 'to'  then
-          append_recipient(recipients_to, p_payload.recipient(i));          
-        when 'cc'  then
-          append_recipient(recipients_cc, p_payload.recipient(i));
-        when 'bcc' then
-          append_recipient(recipients_bcc, p_payload.recipient(i));
-        end case;
-
-      end loop;
-    end if;
-    
-    apex_json.close_object;
-    
-    assert(recipients_to is not null, 'send_email: recipients list cannot be empty');
-    
-    dbms_lob.createtemporary(header, false, dbms_lob.call);
-
-    header := crlf
-      || form_field('from', sender)
-      || form_field('h:Reply-To', p_payload.reply_to)
-      || form_field('to', recipients_to)
-      || form_field('cc', recipients_cc)
-      || form_field('bcc', recipients_bcc)
-      || form_field('o:tag', p_payload.tag)
-      || form_field('subject', p_payload.subject)
-      || field_header('recipient-variables');
-    
-    dbms_lob.append(header, apex_json.get_clob_output);
-    
-    apex_json.free_output;
-   
-  exception
-    when others then
-      apex_json.free_output;
-      raise;
-  end;
+      append_header(field_header('recipient-variables'));
+      dbms_lob.append(header, apex_json.get_clob_output);
+      
+      apex_json.free_output;     
+    exception
+      when others then
+        apex_json.free_output;
+        raise;
+    end;
+  end if;
 
   if p_payload.mail_headers is not null then
-    buf := render_mail_headers(p_payload.mail_headers);
-    dbms_lob.writeappend(header, length(buf), buf);
+    append_header(render_mail_headers(p_payload.mail_headers));
   end if;
 
-  buf := crlf || field_header('html');
-  dbms_lob.writeappend(header, length(buf), buf);
-
+  append_header(field_header('html'));
   dbms_lob.append(header, p_payload.message);
-
-  dbms_lob.writeappend(header, length(crlf), crlf);
+  append_header(crlf);
 
   footer := '--' || boundary || '--';
   
