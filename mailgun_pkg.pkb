@@ -49,6 +49,46 @@ begin
   end if;
 end assert;
 
+function enc_chars (m in varchar2) return varchar2 is
+begin
+  return regexp_replace(asciistr(m),'\\([0-9A-F]{4})','&#x\1;');
+end enc_chars;
+
+function enc_chars (clob_content in clob) return clob is
+  file_len     pls_integer;
+  modulo       pls_integer;
+  pieces       pls_integer;
+  amt          binary_integer      := 8000;
+  buf          varchar2(8000);
+  pos          pls_integer         := 1;
+  filepos      pls_integer         := 1;
+  counter      pls_integer         := 1;
+  out_clob     clob;
+begin
+  msg('enc_chars[clob]');
+
+  assert(clob_content is not null, 'enc_chars: clob_content cannot be null');
+  dbms_lob.createtemporary(out_clob, false, dbms_lob.call);
+  file_len := dbms_lob.getlength (clob_content);
+  msg('enc_chars ' || file_len || ' bytes');
+  modulo := mod (file_len, amt);
+  pieces := trunc (file_len / amt);  
+  while (counter <= pieces) loop
+    dbms_lob.read (clob_content, amt, filepos, buf);
+    buf := enc_chars(buf);
+    dbms_lob.writeappend(out_clob, length(buf), buf);
+    filepos := counter * amt + 1;
+    counter := counter + 1;
+  end loop;  
+  if (modulo <> 0) then
+    dbms_lob.read (clob_content, modulo, filepos, buf);
+    buf := enc_chars(buf);
+    dbms_lob.writeappend(out_clob, length(buf), buf);
+  end if;
+
+  return out_clob;
+end enc_chars;
+
 procedure log_headers (resp in out nocopy utl_http.resp) is
   name  varchar2(256);
   value varchar2(1024);
@@ -532,6 +572,9 @@ begin
   append_header(crlf);
 
   footer := '--' || boundary || '--';
+
+  -- encode characters (like MS Word "smart quotes") that the mail system can't handle
+  header := enc_chars(header);
   
   log.total_bytes := dbms_lob.getlength(header)
                    + length(footer);
