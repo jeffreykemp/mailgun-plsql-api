@@ -1080,90 +1080,90 @@ begin
 
 end drop_job;
 
--- get mailgun stats (signature #1)
+-- get mailgun stats
 function get_stats
   (p_event_types     in varchar2 := 'all'
-  ,p_resolution      in varchar2 := 'day'
+  ,p_resolution      in varchar2 := null
   ,p_start_time      in date     := null
   ,p_end_time        in date     := null
   ,p_duration        in number   := null
-  ) return t_mailgun_stat_arr pipelined is
+  ) return t_mailgun_stat_arr is
+  event_types varchar2(4000);
   str varchar2(32767);
+  cnt number;
+  arr t_mailgun_stat_arr := t_mailgun_stat_arr();
+  res varchar2(10);
+  dt  date;
+  procedure append_stat (i in integer, stat_name in varchar2, stat_detail in varchar2) is
+    val number;
+  begin
+    val := apex_json.get_number(p_path=>'stats[%d].'||stat_name||'.'||stat_detail, p0=>i);
+    if val > 0 then
+      arr.EXTEND(1);
+      arr(arr.LAST) := t_mailgun_stat
+        (dt
+        ,res
+        ,stat_name
+        ,stat_detail
+        ,val
+        );
+    end if;
+  end append_stat;
 begin
-  msg('get_stats ' || p_event_types || ' ' || p_resolution);
-
+  assert(p_event_types is not null, 'p_event_types cannot be null');
   assert(p_resolution in ('hour','day','month'), 'p_resolution must be day, month or hour');
   assert(p_start_time is null or p_duration is null, 'p_start_time or p_duration may be set but not both');
   assert(p_duration >= 1 and p_duration = trunc(p_duration), 'p_duration must be a positive integer');
+  
+  if lower(p_event_types) = 'all' then
+    event_types := 'accepted,delivered,failed,opened,clicked,unsubscribed,complained,stored';
+  else
+    event_types := replace(lower(p_event_types),' ','');
+  end if;
+  -- convert comma-delimited list to parameter list
+  event_types := replace(apex_util.url_encode(p_event_types),',','&'||'event=');
 
   str := get_json
     (p_url    => g_api_url || g_my_domain || '/stats/total'
-    ,p_params => 'event=' || apex_util.url_encode(p_event_types)
-       || case when p_start_time is not null then '&' || 'start='      || apex_util.url_encode(to_char(p_start_time,datetime_format)) end
-       || case when p_end_time   is not null then '&' || 'end='        || apex_util.url_encode(to_char(p_end_time,datetime_format)) end
+    ,p_params => 'event=' || event_types
+       || case when p_start_time is not null then '&' || 'start='      || apex_util.url_encode(to_char(p_start_time,'Dy, dd Mon yyyy hh24:mi:ss')||' +0000') end
+       || case when p_end_time   is not null then '&' || 'end='        || apex_util.url_encode(to_char(p_end_time,'Dy, dd Mon yyyy hh24:mi:ss')||' +0000') end
        || case when p_resolution is not null then '&' || 'resolution=' || apex_util.url_encode(p_resolution) end
        || case when p_duration   is not null then '&' || 'duration='   || apex_util.url_encode(p_duration)
                                                                        || apex_util.url_encode(substr(p_resolution,1,1)) end
     ,p_user   => 'api'
     ,p_pwd    => g_private_api_key);
   
+  msg(str);
+  
   apex_json.parse(str);
+  
+  cnt := apex_json.get_count('stats');
+  res := apex_json.get_varchar2('resolution');
+  
+  for i in 1..cnt loop
+    msg('date='||apex_json.get_varchar2(p_path=>'stats[%d].time',p0=>i));
+    dt := to_date(substr(apex_json.get_varchar2(p_path=>'stats[%d].time',p0=>i), 1, 24), 'Dy, DD Mon YYYY hh24:mi:ss');
+    append_stat(i,'accepted','incoming');
+    append_stat(i,'accepted','outgoing');
+    append_stat(i,'accepted','total');
+    append_stat(i,'delivered','smtp');
+    append_stat(i,'delivered','http');
+    append_stat(i,'delivered','total');
+    append_stat(i,'failed.temporary','espblock');
+    append_stat(i,'failed.permanent','suppress-bounce');
+    append_stat(i,'failed.permanent','suppress-unsubscribe');
+    append_stat(i,'failed.permanent','suppress-complaint');
+    append_stat(i,'failed.permanent','bounce');
+    append_stat(i,'failed.permanent','total');
+    append_stat(i,'stored','total');
+    append_stat(i,'opened','total');
+    append_stat(i,'clicked','total');
+    append_stat(i,'unsubscribed','total');
+    append_stat(i,'complained','total');
+  end loop;
 
-  --TODO: work in progress
-  pipe row(t_mailgun_stat
-    (stat_datetime
-    ,resolution
-    ,stat_name
-    ,stat_detail
-    ,val
-    ));
-
-  return;
-end get_stats;
-
--- get mailgun stats (signature #2)
-function get_stats
-  (p_event_types     in varchar2 := 'all'
-  ,p_end_time        in date     := null
-  ,p_duration_hours  in number   := 24
-  ) return t_mailgun_stat_arr pipelined is
-begin
-  return get_stats
-    (p_event_types => p_event_types
-    ,p_resolution  => 'hour'
-    ,p_end_time    => p_end_time
-    ,p_duration    => p_duration_hours
-    );
-end get_stats;
-
--- get mailgun stats (signature #3)
-function get_stats
-  (p_event_types     in varchar2 := 'all'
-  ,p_end_time        in date     := null
-  ,p_duration_days   in number   := 1
-  ) return t_mailgun_stat_arr pipelined is
-begin
-  return get_stats
-    (p_event_types => p_event_types
-    ,p_resolution  => 'day'
-    ,p_end_time    => p_end_time
-    ,p_duration    => p_duration_days
-    );
-end get_stats;
-
--- get mailgun stats (signature #4)
-function get_stats
-  (p_event_types     in varchar2 := 'all'
-  ,p_end_time        in date     := null
-  ,p_duration_months in number   := 1
-  ) return t_mailgun_stat_arr pipelined is
-begin
-  return get_stats
-    (p_event_types => p_event_types
-    ,p_resolution  => 'month'
-    ,p_end_time    => p_end_time
-    ,p_duration    => p_duration_months
-    );
+  return arr;
 end get_stats;
 
 procedure verbose (p_on in boolean := true) is

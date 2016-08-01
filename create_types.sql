@@ -46,7 +46,7 @@ create type t_mailgun_email is object
 
 create type t_mailgun_stat is object
   ( stat_datetime  date
-  , resolution     varchar2(1)   --"hour" / "day" / "month"
+  , resolution     varchar2(10)  --"hour" / "day" / "month"
   , stat_name      varchar2(100) --e.g. "accepted", "delivered", "failed-permanent"
   , stat_detail    varchar2(100) --e.g. "suppress-bounce", "espblock", "total"
   , val            number
