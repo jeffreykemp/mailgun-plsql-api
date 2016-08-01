@@ -438,13 +438,12 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
     dbms_lob.writeappend(header, length(buf), buf);
   end append_header;
   
-  procedure log_response is
+  procedure log_response (p_sqlerrm in varchar2 := null) is
     -- needs to commit the log entry independently of calling transaction
     pragma autonomous_transaction;
   begin
-    msg('log_response');
+    msg('log_response ' || p_sqlerrm);
 
-    log.sent_ts         := systimestamp;
     log.requested_ts    := p_payload.requested_ts;
     log.from_name       := p_payload.reply_to;
     log.from_email      := p_payload.from_email;
@@ -459,12 +458,22 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
     log.mail_headers    := SUBSTR(p_payload.mail_headers, 1, 4000);
     log.recipients      := SUBSTR(recipients_to, 1, 4000);
 
-    apex_json.parse( resp_text );
-    log.mailgun_id      := apex_json.get_varchar2('id');
-    log.mailgun_message := apex_json.get_varchar2('message');
+    if p_sqlerrm is null then
+
+      log.sent_ts  := systimestamp;
+
+      apex_json.parse( resp_text );
+      log.mailgun_id      := apex_json.get_varchar2('id');
+      log.mailgun_message := apex_json.get_varchar2('message');
     
-    msg('response: ' || log.mailgun_message);
-    msg('msg id: ' || log.mailgun_id);
+      msg('response: ' || log.mailgun_message);
+      msg('msg id: ' || log.mailgun_id);
+     
+    else
+    
+      log.mailgun_message := p_sqlerrm;
+    
+    end if;
 
     insert into mailgun_email_log values log;
     msg('inserted mailgun_email_log: ' || sql%rowcount);
@@ -477,9 +486,9 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
 begin
   msg('send_email(payload) ' || p_payload.to_email || ' "' || p_payload.subject || '"');
   
-  assert(g_private_api_key is not null, 'send_email_synchronous: your mailgun private API key not set');
-  assert(g_my_domain is not null, 'send_email_synchronous: your mailgun domain not set');
-  assert(p_payload.from_email is not null, 'send_email_synchronous: from_email cannot be null');
+  assert(g_private_api_key is not null, 'send_email: your mailgun private API key not set');
+  assert(g_my_domain is not null, 'send_email: your mailgun domain not set');
+  assert(p_payload.from_email is not null, 'send_email: from_email cannot be null');
   
   if p_payload.recipient is not null then
     recipient_count := p_payload.recipient.count;
@@ -677,7 +686,7 @@ begin
   msg('send_email(payload) finished');
 exception
   when others then
-    msg(SQLERRM);
+    log_response(p_sqlerrm => SQLERRM);
     if header is not null then
       dbms_lob.freetemporary(header);
     end if;
