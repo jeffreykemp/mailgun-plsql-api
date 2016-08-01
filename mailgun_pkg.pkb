@@ -1080,6 +1080,92 @@ begin
 
 end drop_job;
 
+-- get mailgun stats (signature #1)
+function get_stats
+  (p_event_types     in varchar2 := 'all'
+  ,p_resolution      in varchar2 := 'day'
+  ,p_start_time      in date     := null
+  ,p_end_time        in date     := null
+  ,p_duration        in number   := null
+  ) return t_mailgun_stat_arr pipelined is
+  str varchar2(32767);
+begin
+  msg('get_stats ' || p_event_types || ' ' || p_resolution);
+
+  assert(p_resolution in ('hour','day','month'), 'p_resolution must be day, month or hour');
+  assert(p_start_time is null or p_duration is null, 'p_start_time or p_duration may be set but not both');
+  assert(p_duration >= 1 and p_duration = trunc(p_duration), 'p_duration must be a positive integer');
+
+  str := get_json
+    (p_url    => g_api_url || g_my_domain || '/stats/total'
+    ,p_params => 'event=' || apex_util.url_encode(p_event_types)
+       || case when p_start_time is not null then '&' || 'start='      || apex_util.url_encode(to_char(p_start_time,datetime_format)) end
+       || case when p_end_time   is not null then '&' || 'end='        || apex_util.url_encode(to_char(p_end_time,datetime_format)) end
+       || case when p_resolution is not null then '&' || 'resolution=' || apex_util.url_encode(p_resolution) end
+       || case when p_duration   is not null then '&' || 'duration='   || apex_util.url_encode(p_duration)
+                                                                       || apex_util.url_encode(substr(p_resolution,1,1)) end
+    ,p_user   => 'api'
+    ,p_pwd    => g_private_api_key);
+  
+  apex_json.parse(str);
+
+  --TODO: work in progress
+  pipe row(t_mailgun_stat
+    (stat_datetime
+    ,resolution
+    ,stat_name
+    ,stat_detail
+    ,val
+    ));
+
+  return;
+end get_stats;
+
+-- get mailgun stats (signature #2)
+function get_stats
+  (p_event_types     in varchar2 := 'all'
+  ,p_end_time        in date     := null
+  ,p_duration_hours  in number   := 24
+  ) return t_mailgun_stat_arr pipelined is
+begin
+  return get_stats
+    (p_event_types => p_event_types
+    ,p_resolution  => 'hour'
+    ,p_end_time    => p_end_time
+    ,p_duration    => p_duration_hours
+    );
+end get_stats;
+
+-- get mailgun stats (signature #3)
+function get_stats
+  (p_event_types     in varchar2 := 'all'
+  ,p_end_time        in date     := null
+  ,p_duration_days   in number   := 1
+  ) return t_mailgun_stat_arr pipelined is
+begin
+  return get_stats
+    (p_event_types => p_event_types
+    ,p_resolution  => 'day'
+    ,p_end_time    => p_end_time
+    ,p_duration    => p_duration_days
+    );
+end get_stats;
+
+-- get mailgun stats (signature #4)
+function get_stats
+  (p_event_types     in varchar2 := 'all'
+  ,p_end_time        in date     := null
+  ,p_duration_months in number   := 1
+  ) return t_mailgun_stat_arr pipelined is
+begin
+  return get_stats
+    (p_event_types => p_event_types
+    ,p_resolution  => 'month'
+    ,p_end_time    => p_end_time
+    ,p_duration    => p_duration_months
+    );
+end get_stats;
+
 procedure verbose (p_on in boolean := true) is
 begin
   msg('verbose ' || apex_debug.tochar(p_on));

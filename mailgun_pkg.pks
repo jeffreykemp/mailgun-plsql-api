@@ -148,6 +148,36 @@ procedure create_job
 -- drop the job
 procedure drop_job;
 
+-- get mailgun stats (signature #1)
+function get_stats
+  (p_event_types     in varchar2 := 'all' -- comma-delimited list of event types
+  ,p_resolution      in varchar2 := 'day' -- "hour", "day" or "month"
+  ,p_start_time      in date     := null  -- default is 7 days prior to end time
+  ,p_end_time        in date     := null  -- default is now
+  ,p_duration        in number   := null  -- (internal use only, do not set)
+  ) return t_mailgun_stat_arr pipelined;
+
+-- get mailgun stats (signature #2)
+function get_stats
+  (p_event_types     in varchar2 := 'all' -- comma-delimited list of event types
+  ,p_end_time        in date     := null  -- default is now
+  ,p_duration_hours  in number   := 24
+  ) return t_mailgun_stat_arr pipelined;
+
+-- get mailgun stats (signature #3)
+function get_stats
+  (p_event_types     in varchar2 := 'all' -- comma-delimited list of event types
+  ,p_end_time        in date     := null  -- default is now
+  ,p_duration_days   in number   := 1
+  ) return t_mailgun_stat_arr pipelined;
+
+-- get mailgun stats (signature #4)
+function get_stats
+  (p_event_types     in varchar2 := 'all' -- comma-delimited list of event types
+  ,p_end_time        in date     := null  -- default is now
+  ,p_duration_months in number   := 1
+  ) return t_mailgun_stat_arr pipelined;
+
 -- set verbose option on/off
 procedure verbose (p_on in boolean := true);
 

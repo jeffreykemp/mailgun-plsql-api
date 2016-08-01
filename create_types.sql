@@ -43,3 +43,14 @@ create type t_mailgun_email is object
   , attachment     t_mailgun_attachment_arr
   );
 /
+
+create type t_mailgun_stat is object
+  ( stat_datetime  date
+  , resolution     varchar2(1)   --"hour" / "day" / "month"
+  , stat_name      varchar2(100) --e.g. "accepted", "delivered", "failed-permanent"
+  , stat_detail    varchar2(100) --e.g. "suppress-bounce", "espblock", "total"
+  , val            number
+  );
+/
+
+create type t_mailgun_stat_arr is table of t_mailgun_stat;
