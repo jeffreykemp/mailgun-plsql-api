@@ -1,5 +1,5 @@
 create or replace package body mailgun_pkg is
-/* mailgun API v0.4.2
+/* mailgun API v0.5
   by Jeffrey Kemp
 */
 
@@ -13,7 +13,7 @@ g_api_url         constant varchar2(200) := 'https://api.mailgun.net/v3/'; --TOD
 g_wallet_path     constant varchar2(1000) := ''; --TODO: put your wallet path here if using Oracle wallet
 g_wallet_password constant varchar2(1000) := ''; --TODO: put your wallet password here if using Oracle wallet
 
-boundary          constant varchar2(100) := '-----n8vtmn6973vyrnsw1agnxs7gzc4e1r';
+boundary          constant varchar2(100) := '-----gjtvt1fu9f77frut4d45770ec7clc3p6nr11uhu476tzmp24nt';
 max_recipients    constant integer := 1000; -- mailgun limitation for recipient variables
 queue_name        constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue';
 queue_table       constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue_tab';
@@ -872,7 +872,10 @@ begin
 
 end reset;
 
-procedure create_queue is
+procedure create_queue
+  (p_max_retries in number := default_max_retries
+  ,p_retry_delay in number := default_retry_delay
+  ) is
 begin
   msg('create_queue ' || queue_name);
 
@@ -887,8 +890,8 @@ begin
   dbms_aqadm.create_queue
     (queue_name     =>  queue_name
     ,queue_table    =>  queue_table
-    ,max_retries    =>  60 --allow failures before giving up on a message
-    ,retry_delay    =>  10 --wait seconds before trying this message again
+    ,max_retries    =>  p_max_retries
+    ,retry_delay    =>  p_retry_delay
     );
 
   dbms_aqadm.start_queue (queue_name);
@@ -907,58 +910,75 @@ begin
 
 end drop_queue;
 
-procedure purge_queue is
+procedure purge_queue (p_msg_state IN VARCHAR2 := default_purge_msg_state) is
   r_opt dbms_aqadm.aq$_purge_options_t;
 begin
   msg('purge_queue ' || queue_table);
 
   dbms_aqadm.purge_queue_table
     (queue_table     => queue_table
-    ,purge_condition => q'[ qtview.msg_state = 'EXPIRED' ]'
+    ,purge_condition => case when p_msg_state is not null
+                        then replace(q'[ qtview.msg_state = '#STATE#' ]'
+                                    ,'#STATE#', p_msg_state)
+                        end
     ,purge_options   => r_opt);
 
 end purge_queue;
 
-procedure push_queue as
+procedure push_queue (p_asynchronous in boolean := true) as
   r_dequeue_options    dbms_aq.dequeue_options_t;
   r_message_properties dbms_aq.message_properties_t;
   msgid                raw(16);
   payload              t_mailgun_email;
   dequeue_count        integer := 0;
+  job                  binary_integer;
 begin
   msg('push_queue');
   
-  -- commit any emails requested in the current session
-  commit;
+  if p_asynchronous then
   
-  r_dequeue_options.wait := dbms_aq.no_wait;
-
-  -- loop through all messages in the queue until there is none
-  -- exit this loop when the e_no_queue_data exception is raised.
-  loop    
-
-    dbms_aq.dequeue
-      (queue_name         => queue_name
-      ,dequeue_options    => r_dequeue_options
-      ,message_properties => r_message_properties
-      ,payload            => payload
-      ,msgid              => msgid
+    dbms_job.submit
+      (job  => job
+      ,what => $$PLSQL_UNIT || '.push_queue(p_asynchronous=>false);'
       );
+      
+    msg('submitted job=' || job);
+      
+  else
+
+    -- commit any emails requested in the current session
+    commit;
     
-    msg('payload priority: ' || r_message_properties.priority
-      || ' enqeued: ' || to_char(r_message_properties.enqueue_time,'dd/mm/yyyy hh24:mi:ss')
-      || ' attempts: ' || r_message_properties.attempts);
+    r_dequeue_options.wait := dbms_aq.no_wait;
 
-    -- process the message
-    send_email (p_payload => payload);  
+    -- loop through all messages in the queue until there is none
+    -- exit this loop when the e_no_queue_data exception is raised.
+    loop    
 
-    commit; -- the queue will treat the message as succeeded
+      dbms_aq.dequeue
+        (queue_name         => queue_name
+        ,dequeue_options    => r_dequeue_options
+        ,message_properties => r_message_properties
+        ,payload            => payload
+        ,msgid              => msgid
+        );
+      
+      msg('payload priority: ' || r_message_properties.priority
+        || ' enqeued: ' || to_char(r_message_properties.enqueue_time,'dd/mm/yyyy hh24:mi:ss')
+        || ' attempts: ' || r_message_properties.attempts);
+
+      -- process the message
+      send_email (p_payload => payload);  
+
+      commit; -- the queue will treat the message as succeeded
+      
+      -- don't bite off everything in one go
+      dequeue_count := dequeue_count + 1;
+      exit when dequeue_count >= max_dequeue_count;
+    end loop;
+
+  end if;
     
-    -- don't bite off everything in one go
-    dequeue_count := dequeue_count + 1;
-    exit when dequeue_count >= max_dequeue_count;
-  end loop;
-
 exception
   when e_no_queue_data then
     msg('push_queue finished count=' || dequeue_count);
@@ -979,8 +999,8 @@ begin
 
   dbms_scheduler.create_job
     (job_name        => job_name
-    ,job_type        => 'stored_procedure'
-    ,job_action      => $$PLSQL_UNIT||'.push_queue'
+    ,job_type        => 'plsql_block'
+    ,job_action      => 'begin '||$$PLSQL_UNIT||'.push_queue(p_asynchronous=>false); end;'
     ,start_date      => systimestamp
     ,repeat_interval => p_repeat_interval
     );

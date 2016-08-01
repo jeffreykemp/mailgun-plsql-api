@@ -1,61 +1,9 @@
 create or replace package mailgun_pkg is
-/* mailgun API v0.4.2
+/* mailgun API v0.5
   by Jeffrey Kemp
   
   Refer to https://github.com/jeffreykemp/mailgun-plsql-api for detailed
   installation instructions and API reference.
-
-FEATURES
-  
-  * email validator
-  NOTE: there is a jQuery plugin for email validation on the client as well
-  For an Apex plugin, download from here:
-  https://github.com/jeffreykemp/jk64-plugin-mailgunemailvalidator
-  
-  * API call to send an email; multiple attachments supported.
-  
-  * Setup procedures to manage a queue and job for asynchronous emails.
-  
-  NOTE: another alternative (one that also works with Apex's builtin emails
-        is to use the mailgun SMTP interface instead.
-
-PREREQUISITES
-  
-  * Oracle Database 11gR2
-  
-  * Oracle Application Express 5.0 (just for the apex packages)
-  
-  * Grants to Oracle / Apex packages:
-  
-    grant create job to myschema;
-    grant create procedure to myschema;
-    grant execute on apex_debug to myschema;
-    grant execute on apex_json to myschema;
-    grant execute on apex_util to myschema;
-    grant execute on dbms_aq to myschema;
-    grant execute on dbms_aqadm to myschema;
-    grant execute on dbms_output to myschema;
-    grant execute on dbms_scheduler to myschema;
-    grant execute on dbms_utility to myschema;
-    grant execute on utl_http to myschema;
-
-  NOTE: requirement for dbms_aqadm may be relaxed by creating the queue
-        manually and removing the relevant procedures from this package.
-    
-  * Your server must be able to connect via https to api.mailgun.net
-
-  * Mailgun account - sign up here: https://mailgun.com/signup
-
-  * The following constants must be set in the mailgun_pkg package
-    for your environment before this can be used.
-  
-    g_public_api_key
-    g_private_api_key
-    g_my_domain
-    g_api_url
-    g_wallet_path
-    g_wallet_password
-
 */
 
 -- Substitution Strings supported by Mailgun
@@ -79,8 +27,11 @@ recipient_id            constant varchar2(100) := '%recipient.id%';
 -- default queue priority
 priority_default        constant integer := 3;
 
--- default job frequency
+-- default parameters
 repeat_interval_default constant varchar2(200) := 'FREQ=MINUTELY;INTERVAL=5;';
+default_purge_msg_state constant varchar2(100) := 'EXPIRED';
+default_max_retries     constant number := 10; --allow failures before giving up on a message
+default_retry_delay     constant number := 10; --wait seconds before trying this message again
 
 -- mail datetime format
 datetime_format         constant varchar2(100) := 'Dy, dd Mon yyyy hh24:mi:ss tzh:tzm';
@@ -176,16 +127,19 @@ procedure attach
 procedure reset;
 
 -- create the queue for asynchronous emails
-procedure create_queue;
+procedure create_queue
+  (p_max_retries in number := default_max_retries
+  ,p_retry_delay in number := default_retry_delay
+  );
 
 -- drop the queue
 procedure drop_queue;
 
 -- purge any expired (failed) emails stuck in the queue
-procedure purge_queue;
+procedure purge_queue (p_msg_state in varchar2 := default_purge_msg_state);
 
 -- send emails in the queue
-procedure push_queue;
+procedure push_queue (p_asynchronous in boolean := true);
 
 -- create a job to periodically call push_queue
 procedure create_job
