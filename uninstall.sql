@@ -30,6 +30,10 @@ begin execute immediate 'drop type t_mailgun_attachment'; exception when others 
 /
 begin execute immediate 'drop type t_mailgun_recipient'; exception when others then if sqlcode!=-4043 then raise; end if; end;
 /
+begin execute immediate 'drop type t_mailgun_stat_arr'; exception when others then if sqlcode!=-4043 then raise; end if; end;
+/
+begin execute immediate 'drop type t_mailgun_stat'; exception when others then if sqlcode!=-4043 then raise; end if; end;
+/
 
 prompt drop package
 begin execute immediate 'drop package mailgun_pkg'; exception when others then if sqlcode!=-4043 then raise; end if; end;
