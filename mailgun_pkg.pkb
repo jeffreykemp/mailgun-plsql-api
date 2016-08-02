@@ -1080,6 +1080,21 @@ begin
 
 end drop_job;
 
+function get_epoch (p_date in date) return number as
+  /*
+  Purpose: get epoch (number of seconds since January 1, 1970)
+  Credit: Alexandria PL/SQL Library (AMAZON_AWS_AUTH_PKG)
+  https://github.com/mortenbra/alexandria-plsql-utils
+  Who     Date        Description
+  ------  ----------  -------------------------------------
+  MBR     09.01.2011  Created
+  */
+  l_returnvalue number;
+begin
+  l_returnvalue := trunc((p_date - to_date('01-01-1970','MM-DD-YYYY')) * 24 * 60 * 60);
+  return l_returnvalue;
+end get_epoch;
+
 -- get mailgun stats
 function get_stats
   (p_event_types     in varchar2 := 'all'
@@ -1088,13 +1103,15 @@ function get_stats
   ,p_end_time        in date     := null
   ,p_duration        in number   := null
   ) return t_mailgun_stat_arr is
-  event_types varchar2(4000);
+
+  prm varchar2(4000);
   str varchar2(32767);
   cnt number;
   arr t_mailgun_stat_arr := t_mailgun_stat_arr();
   res varchar2(10);
   dt  date;
-  procedure append_stat (i in integer, stat_name in varchar2, stat_detail in varchar2) is
+
+  procedure emit (i in integer, stat_name in varchar2, stat_detail in varchar2) is
     val number;
   begin
     val := apex_json.get_number(p_path=>'stats[%d].'||stat_name||'.'||stat_detail, p0=>i);
@@ -1108,7 +1125,8 @@ function get_stats
         ,val
         );
     end if;
-  end append_stat;
+  end emit;
+
 begin
   assert(p_event_types is not null, 'p_event_types cannot be null');
   assert(p_resolution in ('hour','day','month'), 'p_resolution must be day, month or hour');
@@ -1116,25 +1134,35 @@ begin
   assert(p_duration >= 1 and p_duration = trunc(p_duration), 'p_duration must be a positive integer');
   
   if lower(p_event_types) = 'all' then
-    event_types := 'accepted,delivered,failed,opened,clicked,unsubscribed,complained,stored';
+    prm := 'accepted,delivered,failed,opened,clicked,unsubscribed,complained,stored';
   else
-    event_types := replace(lower(p_event_types),' ','');
+    prm := replace(lower(p_event_types),' ','');
   end if;
   -- convert comma-delimited list to parameter list
-  event_types := replace(apex_util.url_encode(p_event_types),',','&'||'event=');
+  prm := 'event=' || replace(apex_util.url_encode(prm), ',', '&'||'event=');
+  
+  if p_start_time is not null then
+    prm := prm || '&' || 'start=' || get_epoch(p_start_time);
+  end if;
+  
+  if p_end_time is not null then
+    prm := prm || '&' || 'end=' || get_epoch(p_end_time);
+  end if;
+  
+  if p_resolution is not null then
+    prm := prm || '&' || 'resolution=' || apex_util.url_encode(p_resolution);
+  end if;
+  
+  if p_duration is not null then
+    prm := prm || '&' || 'duration=' || apex_util.url_encode(p_duration)
+                                     || apex_util.url_encode(substr(p_resolution,1,1));
+  end if;
 
   str := get_json
     (p_url    => g_api_url || g_my_domain || '/stats/total'
-    ,p_params => 'event=' || event_types
-       || case when p_start_time is not null then '&' || 'start='      || apex_util.url_encode(to_char(p_start_time,'Dy, dd Mon yyyy hh24:mi:ss')||' +0000') end
-       || case when p_end_time   is not null then '&' || 'end='        || apex_util.url_encode(to_char(p_end_time,'Dy, dd Mon yyyy hh24:mi:ss')||' +0000') end
-       || case when p_resolution is not null then '&' || 'resolution=' || apex_util.url_encode(p_resolution) end
-       || case when p_duration   is not null then '&' || 'duration='   || apex_util.url_encode(p_duration)
-                                                                       || apex_util.url_encode(substr(p_resolution,1,1)) end
+    ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => g_private_api_key);
-  
-  msg(str);
   
   apex_json.parse(str);
   
@@ -1142,25 +1170,24 @@ begin
   res := apex_json.get_varchar2('resolution');
   
   for i in 1..cnt loop
-    msg('date='||apex_json.get_varchar2(p_path=>'stats[%d].time',p0=>i));
     dt := to_date(substr(apex_json.get_varchar2(p_path=>'stats[%d].time',p0=>i), 1, 24), 'Dy, DD Mon YYYY hh24:mi:ss');
-    append_stat(i,'accepted','incoming');
-    append_stat(i,'accepted','outgoing');
-    append_stat(i,'accepted','total');
-    append_stat(i,'delivered','smtp');
-    append_stat(i,'delivered','http');
-    append_stat(i,'delivered','total');
-    append_stat(i,'failed.temporary','espblock');
-    append_stat(i,'failed.permanent','suppress-bounce');
-    append_stat(i,'failed.permanent','suppress-unsubscribe');
-    append_stat(i,'failed.permanent','suppress-complaint');
-    append_stat(i,'failed.permanent','bounce');
-    append_stat(i,'failed.permanent','total');
-    append_stat(i,'stored','total');
-    append_stat(i,'opened','total');
-    append_stat(i,'clicked','total');
-    append_stat(i,'unsubscribed','total');
-    append_stat(i,'complained','total');
+    emit(i,'accepted','incoming');
+    emit(i,'accepted','outgoing');
+    emit(i,'accepted','total');
+    emit(i,'delivered','smtp');
+    emit(i,'delivered','http');
+    emit(i,'delivered','total');
+    emit(i,'failed.temporary','espblock');
+    emit(i,'failed.permanent','suppress-bounce');
+    emit(i,'failed.permanent','suppress-unsubscribe');
+    emit(i,'failed.permanent','suppress-complaint');
+    emit(i,'failed.permanent','bounce');
+    emit(i,'failed.permanent','total');
+    emit(i,'stored','total');
+    emit(i,'opened','total');
+    emit(i,'clicked','total');
+    emit(i,'unsubscribed','total');
+    emit(i,'complained','total');
   end loop;
 
   return arr;
