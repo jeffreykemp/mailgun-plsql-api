@@ -1,5 +1,5 @@
 prompt uninstall.sql
--- v0.4
+-- v0.5
 
 prompt drop job
 begin dbms_scheduler.stop_job ('mailgun_process_queue'); exception when others then if sqlcode not in (-27366,-27475) then raise; end if; end;
