@@ -56,6 +56,9 @@ create type t_mailgun_stat is object
 create type t_mailgun_stat_arr is table of t_mailgun_stat;
 /
 
+drop type t_mailgun_event_arr;
+drop type t_mailgun_event;
+
 create type t_mailgun_event is object
   ( event                varchar2(100)
   , event_ts             date
@@ -65,12 +68,13 @@ create type t_mailgun_event is object
   , recipient            varchar2(4000)
   , subject              varchar2(4000)
   , attachments          varchar2(4000)
-  , size                 number
+  , size_bytes           number
   , method               varchar2(100)
   , tags                 varchar2(4000)
   , user_variables       varchar2(4000)
-  , delivery_status      varchar2(200)
-  , delivery_status_code varchar2(100)
+  , failed_severity      varchar2(100)
+  , failed_reason        varchar2(100)
+  , delivery_status      varchar2(4000)
   , geolocation          varchar2(4000)
   , recipient_ip         varchar2(100)
   , client_info          varchar2(4000)

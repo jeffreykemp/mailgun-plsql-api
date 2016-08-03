@@ -1,4 +1,4 @@
-create or replace package mailgun_pkg is
+create or replace package mailgun_pkg1 is
 /* mailgun API v0.6
   by Jeffrey Kemp
   
@@ -176,7 +176,7 @@ function get_events
 -- set verbose option on/off
 procedure verbose (p_on in boolean := true);
 
-end mailgun_pkg;
+end mailgun_pkg1;
 /
 
 show errors
