@@ -15,10 +15,10 @@ g_wallet_password constant varchar2(1000) := ''; --TODO: put your wallet passwor
 
 boundary          constant varchar2(100) := '-----gjtvt1fu9f77frut4d45770ec7clc3p6nr11uhu476tzmp24nt';
 max_recipients    constant integer := 1000; -- mailgun limitation for recipient variables
-queue_name        constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue';
-queue_table       constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue_tab';
+queue_name        constant varchar2(100) := sys_context('userenv','current_schema')||'.mailgun_queue';
+queue_table       constant varchar2(100) := sys_context('userenv','current_schema')||'.mailgun_queue_tab';
 job_name          constant varchar2(30) := 'mailgun_process_queue';
-payload_type      constant varchar2(30) := sys_context('userenv','current_schema')||'.t_mailgun_email';
+payload_type      constant varchar2(100) := sys_context('userenv','current_schema')||'.t_mailgun_email';
 max_dequeue_count constant integer := 1000;
 
 -- if true, log all data sent to/from mailgun server
