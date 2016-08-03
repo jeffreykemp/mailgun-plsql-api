@@ -1,5 +1,5 @@
 create or replace package mailgun_pkg is
-/* mailgun API v0.5
+/* mailgun API v0.6
   by Jeffrey Kemp
   
   Refer to https://github.com/jeffreykemp/mailgun-plsql-api for detailed
@@ -32,6 +32,7 @@ repeat_interval_default constant varchar2(200) := 'FREQ=MINUTELY;INTERVAL=5;';
 default_purge_msg_state constant varchar2(100) := 'EXPIRED';
 default_max_retries     constant number := 10; --allow failures before giving up on a message
 default_retry_delay     constant number := 10; --wait seconds before trying this message again
+default_page_size       constant number := 20;
 
 -- mail datetime format
 datetime_format         constant varchar2(100) := 'Dy, dd Mon yyyy hh24:mi:ss tzh:tzm';
@@ -150,16 +151,27 @@ procedure drop_job;
 
 -- get mailgun stats
 function get_stats
-  (p_event_types     in varchar2 := 'all' -- comma-delimited list of event types (refer list below)
+  (p_event_types     in varchar2 := 'all' -- comma-delimited list of event types (accepted,delivered,failed,opened,clicked,unsubscribed,complained,stored)
   ,p_resolution      in varchar2 := null  -- default is "day"; can be "hour", "day" or "month"
   ,p_start_time      in date     := null  -- default is 7 days prior to end time
   ,p_end_time        in date     := null  -- default is now
   ,p_duration        in number   := null  -- backwards from p_end_time
   ) return t_mailgun_stat_arr;
-  
-/* Valid Event Types https://documentation.mailgun.com/api-stats.html#event-types
-   accepted,delivered,failed,opened,clicked,unsubscribed,complained,stored
-*/
+
+-- get mailgun event log
+-- filter expression examples - https://documentation.mailgun.com/api-events.html#filter-expression
+function get_events
+  (p_start_time      in date     := null -- default is now
+  ,p_end_time        in date     := null -- default is to keep going back in history as far as possible
+  ,p_page_size       in number   := default_page_size -- max 300
+  ,p_event           in varchar2 := null -- filter expression (accepted,rejected,delivered,failed,opened,clicked,unsubscribed,complained,stored)
+  ,p_sender          in varchar2 := null -- filter expression, e.g. '"sample@example.com"'
+  ,p_recipient       in varchar2 := null -- filter expression, e.g. 'gmail OR hotmail'
+  ,p_subject         in varchar2 := null -- filter expression, e.g. 'foo AND bar'
+  ,p_size            in varchar2 := null -- filter expression, e.g. '>10000 <20000'
+  ,p_tags            in varchar2 := null -- filter expression, e.g. 'NOT internal'
+  ,p_severity        in varchar2 := null -- for failed events; "temporary" or "permanent"
+  ) return t_mailgun_event_arr pipelined;
 
 -- set verbose option on/off
 procedure verbose (p_on in boolean := true);

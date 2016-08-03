@@ -1,5 +1,5 @@
 create or replace package body mailgun_pkg is
-/* mailgun API v0.5
+/* mailgun API v0.6
   by Jeffrey Kemp
 */
 
@@ -138,7 +138,7 @@ function get_json
   resp  utl_http.resp;
   buf   varchar2(32767);
 begin
-  msg('get_json ' || p_url);
+  msg('get_json ' || p_url || ' ' || p_params);
   
   assert(p_url is not null, 'get_json: p_url cannot be null');
   
@@ -1095,6 +1095,26 @@ begin
   return l_returnvalue;
 end get_epoch;
 
+procedure append_param (buf in out varchar2, attr in varchar2, val in varchar2) is
+begin
+  if val is not null then
+    if buf is not null then
+      buf := buf || '&';
+    end if;
+    buf := buf || attr || '=' || apex_util.url_encode(val);
+  end if;
+end append_param;
+
+procedure append_param (buf in out varchar2, attr in varchar2, dt in date) is
+begin
+  if dt is not null then
+    if buf is not null then
+      buf := buf || '&';
+    end if;
+    buf := buf || attr || '=' || get_epoch(dt);
+  end if;
+end append_param;
+
 -- get mailgun stats
 function get_stats
   (p_event_types     in varchar2 := 'all'
@@ -1128,6 +1148,8 @@ function get_stats
   end emit;
 
 begin
+  msg('get_stats');
+
   assert(p_event_types is not null, 'p_event_types cannot be null');
   assert(p_resolution in ('hour','day','month'), 'p_resolution must be day, month or hour');
   assert(p_start_time is null or p_duration is null, 'p_start_time or p_duration may be set but not both');
@@ -1141,21 +1163,11 @@ begin
   -- convert comma-delimited list to parameter list
   prm := 'event=' || replace(apex_util.url_encode(prm), ',', '&'||'event=');
   
-  if p_start_time is not null then
-    prm := prm || '&' || 'start=' || get_epoch(p_start_time);
-  end if;
-  
-  if p_end_time is not null then
-    prm := prm || '&' || 'end=' || get_epoch(p_end_time);
-  end if;
-  
-  if p_resolution is not null then
-    prm := prm || '&' || 'resolution=' || apex_util.url_encode(p_resolution);
-  end if;
-  
+  append_param(prm, 'start', p_start_time);
+  append_param(prm, 'end', p_end_time);
+  append_param(prm, 'resolution', p_resolution);
   if p_duration is not null then
-    prm := prm || '&' || 'duration=' || apex_util.url_encode(p_duration)
-                                     || apex_util.url_encode(substr(p_resolution,1,1));
+    append_param(prm, 'duration', p_duration || substr(p_resolution,1,1));
   end if;
 
   str := get_json
@@ -1192,6 +1204,95 @@ begin
 
   return arr;
 end get_stats;
+
+function get_events
+  (p_start_time      in date     := null
+  ,p_end_time        in date     := null
+  ,p_page_size       in number   := default_page_size -- max 300
+  ,p_event           in varchar2 := null
+  ,p_sender          in varchar2 := null
+  ,p_recipient       in varchar2 := null
+  ,p_subject         in varchar2 := null
+  ,p_size            in varchar2 := null
+  ,p_tags            in varchar2 := null
+  ,p_severity        in varchar2 := null
+  ) return t_mailgun_event_arr pipelined is
+
+  prm varchar2(4000);
+  str varchar2(32767);
+  cnt number;
+  url varchar2(4000);
+  e   t_mailgun_event := t_mailgun_event();
+
+begin
+  msg('get_events');
+  
+  assert(p_page_size <= 300, 'p_page_size cannot be greater than 300 (' || p_page_size || ')');
+  assert(p_severity in ('temporary','permanent'), 'p_severity must be "temporary" or "permanent"');
+  
+  append_param(prm, 'begin', p_start_time);
+  append_param(prm, 'end', p_end_time);
+  append_param(prm, 'limit', p_page_size);
+  append_param(prm, 'event', p_event);
+  append_param(prm, 'from', p_sender);
+  append_param(prm, 'recipient', p_recipient);
+  append_param(prm, 'subject', p_subject);
+  append_param(prm, 'size', p_size);
+  append_param(prm, 'tags', p_tags);
+  append_param(prm, 'severity', p_severity);
+  
+  -- url to get first page of results
+  url := g_api_url || g_my_domain || '/events';
+  
+  loop
+  
+    str := get_json
+      (p_url    => url
+      ,p_params => prm
+      ,p_user   => 'api'
+      ,p_pwd    => g_private_api_key);  
+
+    apex_json.parse(str);
+
+    cnt := apex_json.get_count('items');
+    
+    exit when cnt = 0;
+    
+    for i in 1..cnt loop
+      e := null;
+      e.event                := substr(apex_json.get_varchar2('items[%d].event', i), 1, 100);
+      e.event_ts             := epoch_to_dt(apex_json.get_number('items[%d].timestamp', i));
+      e.event_id             := substr(apex_json.get_varchar2('items[%d].id', i), 1, 200);
+      e.message_id           := substr(apex_json.get_varchar2('items[%d].message.headers.message-id', i), 1, 200);
+      e.sender               := substr(apex_json.get_varchar2('items[%d].envelope.sender', i), 1, 4000);
+      e.recipient            := substr(apex_json.get_varchar2('items[%d].recipient', i), 1, 4000);
+      e.subject              := substr(apex_json.get_varchar2('items[%d].message.headers.subject', i), 1, 4000);
+      e.attachments          := substr(apex_json.get_varchar2('items[%d].message.attachments', i), 1, 4000);
+      e.size                 := apex_json.get_number('items[%d].message.size', i);
+      e.method               := substr(apex_json.get_varchar2('items[%d].method', i), 1, 100);
+      e.tags                 := substr(apex_json.get_varchar2('items[%d].tags', i), 1, 4000);
+      e.user_variables       := substr(apex_json.get_varchar2('items[%d].user-variables', i), 1, 4000);
+      e.delivery_status      := substr(apex_json.get_varchar2('items[%d].delivery-status.message', i), 1, 200);
+      e.delivery_status_code := substr(apex_json.get_varchar2('items[%d].delivery-status.code', i), 1, 100);
+      e.geolocation          := substr(apex_json.get_varchar2('items[%d].geolocation', i), 1, 4000);
+      e.recipient_ip         := substr(apex_json.get_varchar2('items[%d].ip', i), 1, 100);
+      e.client_info          := substr(apex_json.get_varchar2('items[%d].client-info.client-type', i)
+                                || ', ' || apex_json.get_varchar2('items[%d].client-info.client-os', i)
+                                || ', ' || apex_json.get_varchar2('items[%d].client-info.device-type', i)
+                                || ', ' || apex_json.get_varchar2('items[%d].client-info.client-name', i)
+                                      , 1, 4000);
+      e.client_user_agent    := substr(apex_json.get_varchar2('items[%d].client-info.user-agent', i), 1, 4000);      
+      pipe row (e);
+    end loop;
+    
+    -- get next page of results
+    prm := null;
+    url := apex_json.get_varchar2('paging.next');    
+    exit when url is null;
+  end loop;
+    
+  return;
+end get_events;
 
 procedure verbose (p_on in boolean := true) is
 begin

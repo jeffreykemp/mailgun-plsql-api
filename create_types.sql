@@ -1,5 +1,5 @@
 prompt create_types.sql
--- types used by mailgun v0.5
+-- types used by mailgun v0.6
 
 create type t_mailgun_recipient is object
   ( send_by    varchar2(3)
@@ -54,3 +54,29 @@ create type t_mailgun_stat is object
 /
 
 create type t_mailgun_stat_arr is table of t_mailgun_stat;
+/
+
+create type t_mailgun_event is object
+  ( event                varchar2(100)
+  , event_ts             date
+  , event_id             varchar2(200)
+  , message_id           varchar2(200)
+  , sender               varchar2(4000)
+  , recipient            varchar2(4000)
+  , subject              varchar2(4000)
+  , attachments          varchar2(4000)
+  , size                 number
+  , method               varchar2(100)
+  , tags                 varchar2(4000)
+  , user_variables       varchar2(4000)
+  , delivery_status      varchar2(200)
+  , delivery_status_code varchar2(100)
+  , geolocation          varchar2(4000)
+  , recipient_ip         varchar2(100)
+  , client_info          varchar2(4000)
+  , client_user_agent    varchar2(4000)
+  );
+/
+
+create type t_mailgun_event_arr is table of t_mailgun_event;
+/
