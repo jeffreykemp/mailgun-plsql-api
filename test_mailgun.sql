@@ -202,3 +202,15 @@ select * from table(mailgun_pkg.get_events
 
 -- Get a list of tags
 select * from table(mailgun_pkg.get_tags);
+
+-- Update a tag
+begin
+  mailgun_pkg.update_tag
+    (p_tag_name    => 'mytag'
+    ,p_description => 'my tag description');
+end;
+
+-- Delete a tag
+begin
+  mailgun_pkg.delete_tag (p_tag_name => 'badtag');
+end;
