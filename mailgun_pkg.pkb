@@ -132,6 +132,7 @@ function get_json
   ,p_params in varchar2 := null
   ,p_user   in varchar2 := null
   ,p_pwd    in varchar2 := null
+  ,p_method in varchar2 := 'GET'
   ) return varchar2 is
   url   varchar2(4000) := p_url;
   req   utl_http.req;
@@ -141,6 +142,7 @@ begin
   msg('get_json ' || p_url || ' ' || p_params);
   
   assert(p_url is not null, 'get_json: p_url cannot be null');
+  assert(p_method is not null, 'get_json: p_method cannot be null');
   
   if p_params is not null then
     url := url || '?' || p_params;
@@ -148,7 +150,7 @@ begin
   
   set_wallet;
 
-  req := utl_http.begin_request(url, 'GET');
+  req := utl_http.begin_request(url => url, method => p_method);
 
   if p_user is not null or p_pwd is not null then
     utl_http.set_authentication(req, p_user, p_pwd);
@@ -1205,6 +1207,96 @@ begin
   return arr;
 end get_stats;
 
+-- get mailgun stats
+function get_tag_stats
+  (p_tag             in varchar2
+  ,p_event_types     in varchar2 := 'all'
+  ,p_resolution      in varchar2 := null
+  ,p_start_time      in date     := null
+  ,p_end_time        in date     := null
+  ,p_duration        in number   := null
+  ) return t_mailgun_stat_arr is
+
+  prm    varchar2(4000);
+  str    clob;
+  cnt    number;
+  arr    t_mailgun_stat_arr := t_mailgun_stat_arr();
+  res    varchar2(10);
+  dt     date;
+
+  procedure emit (i in integer, stat_name in varchar2, stat_detail in varchar2) is
+    val number;
+  begin
+    val := apex_json.get_number(p_path=>'stats[%d].'||stat_name||'.'||stat_detail, p0=>i);
+    if val > 0 then
+      arr.EXTEND(1);
+      arr(arr.LAST) := t_mailgun_stat
+        ( stat_datetime => dt
+        , resolution    => res
+        , stat_name     => stat_name
+        , stat_detail   => stat_detail
+        , val           => val
+        );
+    end if;
+  end emit;
+begin
+  assert(p_tag is not null, 'p_tag cannot be null');
+  assert(instr(p_tag,' ') = 0, 'p_tag cannot contain spaces');
+  assert(p_event_types is not null, 'p_event_types cannot be null');
+  assert(p_resolution in ('hour','day','month'), 'p_resolution must be day, month or hour');
+  assert(p_start_time is null or p_duration is null, 'p_start_time or p_duration may be set but not both');
+  assert(p_duration >= 1 and p_duration = trunc(p_duration), 'p_duration must be a positive integer');
+  
+  if lower(p_event_types) = 'all' then
+    prm := 'accepted,delivered,failed,opened,clicked,unsubscribed,complained,stored';
+  else
+    prm := replace(lower(p_event_types),' ','');
+  end if;
+  -- convert comma-delimited list to parameter list
+  prm := 'event=' || replace(apex_util.url_encode(prm), ',', '&'||'event=');
+  
+  url_param(prm, 'start', p_start_time);
+  url_param(prm, 'end', p_end_time);
+  url_param(prm, 'resolution', p_resolution);
+  if p_duration is not null then
+    url_param(prm, 'duration', p_duration || substr(p_resolution,1,1));
+  end if;
+
+  str := get_json
+    (p_url    => g_api_url || g_my_domain || '/tags/' || apex_util.url_encode(p_tag) || '/stats'
+    ,p_params => prm
+    ,p_user   => 'api'
+    ,p_pwd    => g_private_api_key);
+  
+  apex_json.parse(str);
+
+  cnt := apex_json.get_count('stats');
+  res := apex_json.get_varchar2('resolution');
+  
+  for i in 1..cnt loop
+    dt := to_date(substr(apex_json.get_varchar2(p_path=>'stats[%d].time',p0=>i), 1, 24), 'Dy, DD Mon YYYY hh24:mi:ss');
+    emit(i,'accepted','incoming');
+    emit(i,'accepted','outgoing');
+    emit(i,'accepted','total');
+    emit(i,'delivered','smtp');
+    emit(i,'delivered','http');
+    emit(i,'delivered','total');
+    emit(i,'failed.temporary','espblock');
+    emit(i,'failed.permanent','suppress-bounce');
+    emit(i,'failed.permanent','suppress-unsubscribe');
+    emit(i,'failed.permanent','suppress-complaint');
+    emit(i,'failed.permanent','bounce');
+    emit(i,'failed.permanent','total');
+    emit(i,'stored','total');
+    emit(i,'opened','total');
+    emit(i,'clicked','total');
+    emit(i,'unsubscribed','total');
+    emit(i,'complained','total');
+  end loop;
+
+  return arr;
+end get_tag_stats;
+
 -- return a comma-delimited string based on the array found at p_path (must already contain a %d), with
 -- all values for the given attribute
 function json_arr_str
@@ -1364,6 +1456,76 @@ begin
     
   return;
 end get_events;
+
+function get_tags
+  (p_limit in number := null -- max rows to fetch (default 100)
+  ) return t_mailgun_tag_arr pipelined is
+
+  prm  varchar2(4000);
+  str  clob;
+  cnt  number;
+
+begin
+  url_param(prm, 'limit', p_limit);
+  
+  str := get_json
+    (p_url    => g_api_url || g_my_domain || '/tags'
+    ,p_params => prm
+    ,p_user   => 'api'
+    ,p_pwd    => g_private_api_key);
+
+  apex_json.parse(str);
+
+  cnt := apex_json.get_count('items');
+  
+  for i in 1..cnt loop
+    pipe row (t_mailgun_tag
+      ( tag_name    => substr(apex_json.get_varchar2('items[%d].tag', i), 1, 4000)
+      , description => substr(apex_json.get_varchar2('items[%d].description', i), 1, 4000)
+      ));
+  end loop;
+    
+  return;
+end get_tags;
+
+procedure update_tag
+  (p_tag         in varchar2
+  ,p_description in varchar2 := null) is
+  prm  varchar2(4000);
+  str  clob;
+begin
+  assert(p_tag is not null, 'p_tag cannot be null');
+  assert(instr(p_tag,' ') = 0, 'p_tag cannot contain spaces');
+
+  url_param(prm, 'description', p_description);
+  
+  str := get_json
+    (p_method => 'PUT'
+    ,p_url    => g_api_url || g_my_domain || '/tags/' || apex_util.url_encode(p_tag)
+    ,p_params => prm
+    ,p_user   => 'api'
+    ,p_pwd    => g_private_api_key);
+  
+  -- normally it returns {"message":"Tag updated"}
+  -- TODO: determine if there is an error indicator, raise as exception
+end update_tag;
+
+procedure delete_tag (p_tag in varchar2) is
+  prm  varchar2(4000);
+  str  clob;
+begin
+  assert(p_tag is not null, 'p_tag cannot be null');
+  assert(instr(p_tag,' ') = 0, 'p_tag cannot contain spaces');
+  
+  str := get_json
+    (p_method => 'DELETE'
+    ,p_url    => g_api_url || g_my_domain || '/tags/' || apex_util.url_encode(p_tag)
+    ,p_user   => 'api'
+    ,p_pwd    => g_private_api_key);
+  
+  -- normally it returns {"message":"Tag deleted"}
+  -- TODO: determine if there is an error indicator, raise as exception
+end delete_tag;
 
 procedure verbose (p_on in boolean := true) is
 begin

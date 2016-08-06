@@ -82,3 +82,12 @@ create type t_mailgun_event is object
 
 create type t_mailgun_event_arr is table of t_mailgun_event;
 /
+
+create type t_mailgun_tag is object
+  ( tag_name             varchar2(4000)
+  , description          varchar2(4000)
+  );
+/
+
+create type t_mailgun_tag_arr is table of t_mailgun_tag;
+/

@@ -158,6 +158,16 @@ function get_stats
   ,p_duration        in number   := null  -- backwards from p_end_time
   ) return t_mailgun_stat_arr;
 
+-- get mailgun stats for a tag
+function get_tag_stats
+  (p_tag             in varchar2          -- tag name (no spaces allowed)
+  ,p_event_types     in varchar2 := 'all' -- comma-delimited list of event types (accepted,delivered,failed,opened,clicked,unsubscribed,complained,stored)
+  ,p_resolution      in varchar2 := null  -- default is "day"; can be "hour", "day" or "month"
+  ,p_start_time      in date     := null  -- default is 7 days prior to end time
+  ,p_end_time        in date     := null  -- default is now
+  ,p_duration        in number   := null  -- backwards from p_end_time
+  ) return t_mailgun_stat_arr;
+
 -- get mailgun event log
 -- filter expression examples - https://documentation.mailgun.com/api-events.html#filter-expression
 function get_events
@@ -171,6 +181,19 @@ function get_events
   ,p_tags            in varchar2 := null -- filter expression, e.g. 'NOT internal'
   ,p_severity        in varchar2 := null -- for failed events; "temporary" or "permanent"
   ) return t_mailgun_event_arr pipelined;
+
+-- get mailgun tags
+function get_tags
+  (p_limit in number := null -- max rows to fetch (default 100)
+  ) return t_mailgun_tag_arr pipelined;
+
+-- add a tag, or update a tag description
+procedure update_tag
+  (p_tag         in varchar2 -- no spaces allowed
+  ,p_description in varchar2 := null);
+
+-- delete a tag
+procedure delete_tag (p_tag in varchar2);  -- no spaces allowed
 
 -- set verbose option on/off
 procedure verbose (p_on in boolean := true);

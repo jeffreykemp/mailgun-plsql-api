@@ -181,6 +181,9 @@ select * from table(mailgun_pkg.get_stats
   ,p_end_time    => trunc(sysdate,'MM') - 0.00001
   ));
 
+-- Get all stats for a tag for the last 7 days, by day:
+select * from table(mailgun_pkg.get_tag_stats('mytag'));
+
 -- Get recent events log:
 select * from table(mailgun_pkg.get_events);
 
@@ -190,9 +193,12 @@ select * from table(mailgun_pkg.get_events
   ,p_event     => 'failed'));
 
 -- Get emails successfully sent to anyone with a gmail or hotmail address on a particular day:
-select * from table(mailgun_pkg1.get_events
+select * from table(mailgun_pkg.get_events
   (p_event      => 'delivered'
   ,p_start_time => date'2016-08-05'
   ,p_end_time   => date'2016-08-06' - 0.00001
   ,p_recipient  => 'gmail OR hotmail'
   ));
+
+-- Get a list of tags
+select * from table(mailgun_pkg.get_tags);
