@@ -89,6 +89,11 @@ begin
   return out_clob;
 end enc_chars;
 
+function utc_to_session_tz (ts in varchar2) return timestamp is
+begin
+  return to_timestamp_tz(ts, 'Dy, dd Mon yyyy hh24:mi:ss tzr') at local;
+end utc_to_session_tz;
+
 procedure log_headers (resp in out nocopy utl_http.resp) is
   name  varchar2(256);
   value varchar2(1024);
@@ -1184,7 +1189,7 @@ begin
   res := apex_json.get_varchar2('resolution');
   
   for i in 1..cnt loop
-    dt := to_date(substr(apex_json.get_varchar2(p_path=>'stats[%d].time',p0=>i), 1, 24), 'Dy, DD Mon YYYY hh24:mi:ss');
+    dt := utc_to_session_tz(apex_json.get_varchar2(p_path=>'stats[%d].time',p0=>i));
     emit(i,'accepted','incoming');
     emit(i,'accepted','outgoing');
     emit(i,'accepted','total');
@@ -1274,7 +1279,7 @@ begin
   res := apex_json.get_varchar2('resolution');
   
   for i in 1..cnt loop
-    dt := to_date(substr(apex_json.get_varchar2(p_path=>'stats[%d].time',p0=>i), 1, 24), 'Dy, DD Mon YYYY hh24:mi:ss');
+    dt := utc_to_session_tz(apex_json.get_varchar2(p_path=>'stats[%d].time',p0=>i));
     emit(i,'accepted','incoming');
     emit(i,'accepted','outgoing');
     emit(i,'accepted','total');
@@ -1507,7 +1512,6 @@ begin
     ,p_pwd    => g_private_api_key);
   
   -- normally it returns {"message":"Tag updated"}
-  -- TODO: determine if there is an error indicator, raise as exception
 end update_tag;
 
 procedure delete_tag (p_tag in varchar2) is
@@ -1524,8 +1528,123 @@ begin
     ,p_pwd    => g_private_api_key);
   
   -- normally it returns {"message":"Tag deleted"}
-  -- TODO: determine if there is an error indicator, raise as exception
 end delete_tag;
+
+function get_suppressions
+  (p_type  in varchar2 -- 'bounces', 'unsubscribes', or 'complaints'
+  ,p_limit in number := null -- max rows to fetch (default 100)
+  ) return t_mailgun_suppression_arr pipelined is
+
+  prm  varchar2(4000);
+  str  clob;
+  cnt  number;
+
+begin
+  assert(p_type is not null, 'p_type cannot be null');
+  assert(p_type in ('bounces','unsubscribes','complaints'), 'p_type must be bounces, unsubscribes, or complaints');
+
+  url_param(prm, 'limit', p_limit);
+  
+  str := get_json
+    (p_url    => g_api_url || g_my_domain || '/' || p_type
+    ,p_params => prm
+    ,p_user   => 'api'
+    ,p_pwd    => g_private_api_key);
+
+  apex_json.parse(str);
+
+  cnt := apex_json.get_count('items');
+  
+  for i in 1..cnt loop
+    pipe row (t_mailgun_suppression
+      ( suppression_type => substr(p_type, 1, length(p_type)-1)
+      , email_address    => substr(apex_json.get_varchar2('items[%d].address', i), 1, 4000)
+      , unsubscribe_tag  => substr(apex_json.get_varchar2('items[%d].tag', i), 1, 4000)
+      , bounce_code      => substr(apex_json.get_varchar2('items[%d].code', i), 1, 255)
+      , bounce_error     => substr(apex_json.get_varchar2('items[%d].error', i), 1, 4000)
+      , created_dt       => utc_to_session_tz(apex_json.get_varchar2('items[%d].created_at', i))
+      ));
+  end loop;
+    
+  return;
+end get_suppressions;
+
+-- remove an email address from the bounce list
+procedure delete_bounce (p_email_address in varchar2) is
+  prm  varchar2(4000);
+  str  clob;
+begin
+  assert(p_email_address is not null, 'p_email_address cannot be null');
+
+  str := get_json
+    (p_url    => g_api_url || g_my_domain || '/bounces/' || apex_util.url_encode(p_email_address)
+    ,p_user   => 'api'
+    ,p_pwd    => g_private_api_key
+    ,p_method => 'DELETE');
+
+  -- normally it returns {"address":"...the address...","message":"Bounced address has been removed"}
+end delete_bounce;
+
+-- add an email address to the unsubscribe list
+procedure add_unsubscribe
+  (p_email_address in varchar2
+  ,p_tag           in varchar2 := null
+  ) is
+  prm  varchar2(4000);
+  str  clob;
+begin
+  assert(p_email_address is not null, 'p_email_address cannot be null');
+
+  url_param(prm, 'address', p_email_address);
+  url_param(prm, 'tag', p_tag);
+
+  str := get_json
+    (p_url    => g_api_url || g_my_domain || '/unsubscribes'
+    ,p_params => prm
+    ,p_user   => 'api'
+    ,p_pwd    => g_private_api_key
+    ,p_method => 'POST');
+
+end add_unsubscribe;
+
+-- remove an email address from the unsubscribe list
+procedure delete_unsubscribe
+  (p_email_address in varchar2
+  ,p_tag           in varchar2 := null
+  ) is
+  prm  varchar2(4000);
+  str  clob;
+begin
+  assert(p_email_address is not null, 'p_email_address cannot be null');
+
+  url_param(prm, 'tag', p_tag);
+
+  str := get_json
+    (p_url    => g_api_url || g_my_domain || '/unsubscribes/' || apex_util.url_encode(p_email_address)
+    ,p_params => prm
+    ,p_user   => 'api'
+    ,p_pwd    => g_private_api_key
+    ,p_method => 'DELETE');
+
+  -- normally it returns {"message":"Unsubscribe event has been removed"}
+end delete_unsubscribe;
+
+-- remove an email address from the complaint list
+procedure delete_complaint (p_email_address in varchar2) is
+  str  clob;
+begin
+  assert(p_email_address is not null, 'p_email_address cannot be null');
+
+  str := get_json
+    (p_url    => g_api_url || g_my_domain || '/complaints/' || apex_util.url_encode(p_email_address)
+    ,p_user   => 'api'
+    ,p_pwd    => g_private_api_key
+    ,p_method => 'DELETE');
+
+  apex_json.parse(str);
+
+  -- normally it returns {"message":"Spam complaint has been removed"}
+end delete_complaint;
 
 procedure verbose (p_on in boolean := true) is
 begin

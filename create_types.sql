@@ -91,3 +91,16 @@ create type t_mailgun_tag is object
 
 create type t_mailgun_tag_arr is table of t_mailgun_tag;
 /
+
+create type t_mailgun_suppression is object
+  ( suppression_type     varchar2(100) -- bounce, unsubscribe, or complaint
+  , email_address        varchar2(4000)
+  , unsubscribe_tag      varchar2(4000) -- unsubscribed from a particular tag
+  , bounce_code          varchar2(255)
+  , bounce_error         varchar2(4000)
+  , created_dt           date
+  );
+/
+
+create type t_mailgun_suppression_arr is table of t_mailgun_suppression;
+/

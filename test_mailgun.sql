@@ -206,11 +206,54 @@ select * from table(mailgun_pkg.get_tags);
 -- Update a tag
 begin
   mailgun_pkg.update_tag
-    (p_tag_name    => 'mytag'
+    (p_tag         => 'mytag'
     ,p_description => 'my tag description');
 end;
 
 -- Delete a tag
 begin
-  mailgun_pkg.delete_tag (p_tag_name => 'badtag');
+  mailgun_pkg.delete_tag (p_tag => 'badtag');
+end;
+
+-- Get bounces
+select * from table(mailgun_pkg.get_suppressions(p_type => 'bounces'));
+
+-- Get unsubscribes
+select * from table(mailgun_pkg.get_suppressions(p_type => 'unsubscribes'));
+
+-- Get complaints
+select * from table(mailgun_pkg.get_suppressions(p_type => 'complaints'));
+
+-- Remove an email address from the bounce list
+begin
+  mailgun_pkg.delete_bounce (p_email_address => 'sample@example.com');
+end;
+
+-- Add an email address to the unsubscribe list
+begin
+  mailgun_pkg.add_unsubscribe (p_email_address => 'sample@example.com');
+end;
+
+-- Add an email address to the unsubscribe list for a particular tag
+begin
+  mailgun_pkg.add_unsubscribe
+    (p_email_address => 'sample@example.com'
+    ,p_tag           => 'mytag');
+end;
+
+-- Remove an email address from the unsubscribe list
+begin
+  mailgun_pkg.delete_unsubscribe (p_email_address => 'sample@example.com');
+end;
+
+-- Remove an email address from the unsubscribe list for a particular tag
+begin
+  mailgun_pkg.delete_unsubscribe
+    (p_email_address => 'sample@example.com'
+    ,p_tag           => 'mytag');
+end;
+
+-- Remove an email address from the spam complaint list
+begin
+  mailgun_pkg.delete_complaint (p_email_address => 'sample@example.com');
 end;

@@ -195,6 +195,28 @@ procedure update_tag
 -- delete a tag
 procedure delete_tag (p_tag in varchar2);  -- no spaces allowed
 
+-- get bounces, unsubscribes, or complaints
+function get_suppressions
+  (p_type  in varchar2 -- 'bounces', 'unsubscribes', or 'complaints'
+  ,p_limit in number := null -- max rows to fetch (default 100)
+  ) return t_mailgun_suppression_arr pipelined;
+
+-- remove an email address from the bounce list
+procedure delete_bounce (p_email_address in varchar2);
+
+-- add an email address to the unsubscribed list
+procedure add_unsubscribe
+  (p_email_address in varchar2
+  ,p_tag           in varchar2 := null);
+
+-- remove an email address from the unsubscribed list
+procedure delete_unsubscribe
+  (p_email_address in varchar2
+  ,p_tag           in varchar2 := null);
+
+-- remove an email address from the complaint list
+procedure delete_complaint (p_email_address in varchar2);
+
 -- set verbose option on/off
 procedure verbose (p_on in boolean := true);
 
