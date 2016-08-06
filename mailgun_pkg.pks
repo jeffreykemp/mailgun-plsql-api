@@ -1,4 +1,4 @@
-create or replace package mailgun_pkg1 is
+create or replace package mailgun_pkg is
 /* mailgun API v0.6
   by Jeffrey Kemp
   
@@ -163,12 +163,11 @@ function get_stats
 function get_events
   (p_start_time      in date     := null -- default is now
   ,p_end_time        in date     := null -- default is to keep going back in history as far as possible
-  ,p_page_size       in number   := default_page_size -- max 300
+  ,p_page_size       in number   := default_page_size -- rows to fetch per API call; max 300
   ,p_event           in varchar2 := null -- filter expression (accepted,rejected,delivered,failed,opened,clicked,unsubscribed,complained,stored)
   ,p_sender          in varchar2 := null -- filter expression, e.g. '"sample@example.com"'
   ,p_recipient       in varchar2 := null -- filter expression, e.g. 'gmail OR hotmail'
   ,p_subject         in varchar2 := null -- filter expression, e.g. 'foo AND bar'
-  ,p_size            in varchar2 := null -- filter expression, e.g. '>10000 <20000'
   ,p_tags            in varchar2 := null -- filter expression, e.g. 'NOT internal'
   ,p_severity        in varchar2 := null -- for failed events; "temporary" or "permanent"
   ) return t_mailgun_event_arr pipelined;
@@ -176,7 +175,7 @@ function get_events
 -- set verbose option on/off
 procedure verbose (p_on in boolean := true);
 
-end mailgun_pkg1;
+end mailgun_pkg;
 /
 
 show errors

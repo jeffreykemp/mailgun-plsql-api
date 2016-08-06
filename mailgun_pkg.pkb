@@ -1,21 +1,15 @@
-create or replace package body mailgun_pkg1 is
+create or replace package body mailgun_pkg is
 /* mailgun API v0.6
   by Jeffrey Kemp
 */
 
---TODO: remove this private code
-g_public_api_key  constant varchar2(200) := site_parameter.get_value('MAILGUN_PUBLIC_KEY');
-g_private_api_key constant varchar2(200) := site_parameter.get_value('MAILGUN_SECRET_KEY');
-g_my_domain       constant varchar2(200) := site_parameter.get_value('MAILGUN_MY_DOMAIN');
-g_api_url         constant varchar2(200) := site_parameter.get_value('MAILGUN_API_URL');
-
 -- If you get "PLS-00322: declaration of a constant 'x' must contain an initialization assignment",
 -- it's probably because you forgot to edit the constants below.
 
---g_public_api_key  constant varchar2(200) /*:= 'TODO: put your public API key here' */;
---g_private_api_key constant varchar2(200) /*:= 'TODO: put your private API key here' */;
---g_my_domain       constant varchar2(200) /*:= 'TODO: put your domain here' */;
---g_api_url         constant varchar2(200) := 'https://api.mailgun.net/v3/'; --TODO: change this if you are using reverse proxy method
+g_public_api_key  constant varchar2(200) /*:= 'TODO: put your public API key here' */;
+g_private_api_key constant varchar2(200) /*:= 'TODO: put your private API key here' */;
+g_my_domain       constant varchar2(200) /*:= 'TODO: put your domain here' */;
+g_api_url         constant varchar2(200) := 'https://api.mailgun.net/v3/'; --TODO: change this if you are using reverse proxy method
 g_wallet_path     constant varchar2(1000) := ''; --TODO: put your wallet path here if using Oracle wallet
 g_wallet_password constant varchar2(1000) := ''; --TODO: put your wallet password here if using Oracle wallet
 
@@ -1104,7 +1098,7 @@ begin
   return date'1970-01-01' + (p_epoch / 24 / 60 / 60);
 end epoch_to_dt;
 
-procedure append_param (buf in out varchar2, attr in varchar2, val in varchar2) is
+procedure url_param (buf in out varchar2, attr in varchar2, val in varchar2) is
 begin
   if val is not null then
     if buf is not null then
@@ -1112,9 +1106,9 @@ begin
     end if;
     buf := buf || attr || '=' || apex_util.url_encode(val);
   end if;
-end append_param;
+end url_param;
 
-procedure append_param (buf in out varchar2, attr in varchar2, dt in date) is
+procedure url_param (buf in out varchar2, attr in varchar2, dt in date) is
 begin
   if dt is not null then
     if buf is not null then
@@ -1122,7 +1116,7 @@ begin
     end if;
     buf := buf || attr || '=' || get_epoch(dt);
   end if;
-end append_param;
+end url_param;
 
 -- get mailgun stats
 function get_stats
@@ -1133,12 +1127,12 @@ function get_stats
   ,p_duration        in number   := null
   ) return t_mailgun_stat_arr is
 
-  prm varchar2(4000);
-  str varchar2(32767);
-  cnt number;
-  arr t_mailgun_stat_arr := t_mailgun_stat_arr();
-  res varchar2(10);
-  dt  date;
+  prm    varchar2(4000);
+  str    clob;
+  cnt    number;
+  arr    t_mailgun_stat_arr := t_mailgun_stat_arr();
+  res    varchar2(10);
+  dt     date;
 
   procedure emit (i in integer, stat_name in varchar2, stat_detail in varchar2) is
     val number;
@@ -1155,10 +1149,7 @@ function get_stats
         );
     end if;
   end emit;
-
 begin
-  msg('get_stats');
-
   assert(p_event_types is not null, 'p_event_types cannot be null');
   assert(p_resolution in ('hour','day','month'), 'p_resolution must be day, month or hour');
   assert(p_start_time is null or p_duration is null, 'p_start_time or p_duration may be set but not both');
@@ -1172,11 +1163,11 @@ begin
   -- convert comma-delimited list to parameter list
   prm := 'event=' || replace(apex_util.url_encode(prm), ',', '&'||'event=');
   
-  append_param(prm, 'start', p_start_time);
-  append_param(prm, 'end', p_end_time);
-  append_param(prm, 'resolution', p_resolution);
+  url_param(prm, 'start', p_start_time);
+  url_param(prm, 'end', p_end_time);
+  url_param(prm, 'resolution', p_resolution);
   if p_duration is not null then
-    append_param(prm, 'duration', p_duration || substr(p_resolution,1,1));
+    url_param(prm, 'duration', p_duration || substr(p_resolution,1,1));
   end if;
 
   str := get_json
@@ -1234,7 +1225,8 @@ begin
   return buf;
 end json_arr_str;
 
-function json_members_arr
+-- comma-delimited list of attributes
+function json_members_list
   (p_path in varchar2
   ,p0     in varchar2
   ) return varchar2 is
@@ -1254,7 +1246,30 @@ begin
 exception
   when value_error /*not an array or object*/ then
     return null;
-end json_members_arr;
+end json_members_list;
+
+-- comma-delimited list of attribute/value pairs
+function json_value_pairs
+  (p_path in varchar2
+  ,p0     in varchar2
+  ) return varchar2 is
+  arr wwv_flow_t_varchar2;
+  buf varchar2(32767);
+begin
+  arr := apex_json.get_members(p_path, p0);
+  if arr.count > 0 then
+    for i in 1..arr.count loop
+      if buf is not null then
+        buf := buf || ',';
+      end if;
+      buf := buf || arr(i) || ':' || apex_json.get_varchar2(p_path || '.' || arr(i), p0);
+    end loop;
+  end if;
+  return buf;
+exception
+  when value_error /*not an array or object*/ then
+    return null;
+end json_value_pairs;
 
 function get_events
   (p_start_time      in date     := null
@@ -1264,7 +1279,6 @@ function get_events
   ,p_sender          in varchar2 := null
   ,p_recipient       in varchar2 := null
   ,p_subject         in varchar2 := null
-  ,p_size            in varchar2 := null
   ,p_tags            in varchar2 := null
   ,p_severity        in varchar2 := null
   ) return t_mailgun_event_arr pipelined is
@@ -1275,21 +1289,18 @@ function get_events
   url  varchar2(4000);
 
 begin
-  msg('get_events');
-  
   assert(p_page_size <= 300, 'p_page_size cannot be greater than 300 (' || p_page_size || ')');
   assert(p_severity in ('temporary','permanent'), 'p_severity must be "temporary" or "permanent"');
   
-  append_param(prm, 'begin', p_start_time);
-  append_param(prm, 'end', p_end_time);
-  append_param(prm, 'limit', p_page_size);
-  append_param(prm, 'event', p_event);
-  append_param(prm, 'from', p_sender);
-  append_param(prm, 'recipient', p_recipient);
-  append_param(prm, 'subject', p_subject);
-  append_param(prm, 'size', p_size);
-  append_param(prm, 'tags', p_tags);
-  append_param(prm, 'severity', p_severity);
+  url_param(prm, 'begin', p_start_time);
+  url_param(prm, 'end', p_end_time);
+  url_param(prm, 'limit', p_page_size);
+  url_param(prm, 'event', p_event);
+  url_param(prm, 'from', p_sender);
+  url_param(prm, 'recipient', p_recipient);
+  url_param(prm, 'subject', p_subject);
+  url_param(prm, 'tags', p_tags);
+  url_param(prm, 'severity', p_severity);
   
   -- url to get first page of results
   url := g_api_url || g_my_domain || '/events';
@@ -1313,32 +1324,33 @@ begin
         ( event                => substr(apex_json.get_varchar2('items[%d].event', i), 1, 100)
         , event_ts             => epoch_to_dt(apex_json.get_number('items[%d].timestamp', i))
         , event_id             => substr(apex_json.get_varchar2('items[%d].id', i), 1, 200)
-        , message_id           => substr(apex_json.get_varchar2('items[%d].message.headers.message-id', i), 1, 200)
+        , message_id           => substr(apex_json.get_varchar2('items[%d].message.headers."message-id"', i), 1, 200)
         , sender               => substr(apex_json.get_varchar2('items[%d].envelope.sender', i), 1, 4000)
         , recipient            => substr(apex_json.get_varchar2('items[%d].recipient', i), 1, 4000)
         , subject              => substr(apex_json.get_varchar2('items[%d].message.headers.subject', i), 1, 4000)
         , attachments          => substr(json_arr_str('items[%d].message.attachments', i, 'filename'), 1, 4000)
         , size_bytes           => apex_json.get_number('items[%d].message.size', i)
         , method               => substr(apex_json.get_varchar2('items[%d].method', i), 1, 100)
-        , tags                 => substr(json_members_arr('items[%d].tags', i), 1, 4000)
-        , user_variables       => substr(apex_json.get_varchar2('items[%d].user-variables', i), 1, 4000)
+        , tags                 => substr(json_members_list('items[%d].tags', i), 1, 4000)
+        , user_variables       => substr(json_value_pairs('items[%d]."user-variables"', i), 1, 4000)
+        , log_level            => substr(apex_json.get_varchar2('items[%d]."log-level"', i), 1, 100)
         , failed_severity      => substr(apex_json.get_varchar2('items[%d].severity', i), 1, 100)
         , failed_reason        => substr(apex_json.get_varchar2('items[%d].reason', i), 1, 100)
-        , delivery_status      => substr(trim(apex_json.get_varchar2('items[%d].delivery-status.code', i)
-                                    || ' ' || apex_json.get_varchar2('items[%d].delivery-status.message', i)
-                                    || ' ' || apex_json.get_varchar2('items[%d].delivery-status.description', i)
+        , delivery_status      => substr(trim(apex_json.get_varchar2('items[%d]."delivery-status".code', i)
+                                    || ' ' || apex_json.get_varchar2('items[%d]."delivery-status".message', i)
+                                    || ' ' || apex_json.get_varchar2('items[%d]."delivery-status".description', i)
                                              ),1, 4000)
         , geolocation          => substr(trim(apex_json.get_varchar2('items[%d].geolocation.country', i)
                                     || ' ' || apex_json.get_varchar2('items[%d].geolocation.region', i)
                                     || ' ' || apex_json.get_varchar2('items[%d].geolocation.city', i)
                                              ), 1, 4000)
         , recipient_ip         => substr(apex_json.get_varchar2('items[%d].ip', i), 1, 100)
-        , client_info          => substr(trim(apex_json.get_varchar2('items[%d].client-info.client-type', i)
-                                    || ' ' || apex_json.get_varchar2('items[%d].client-info.client-os', i)
-                                    || ' ' || apex_json.get_varchar2('items[%d].client-info.device-type', i)
-                                    || ' ' || apex_json.get_varchar2('items[%d].client-info.client-name', i)
+        , client_info          => substr(trim(apex_json.get_varchar2('items[%d]."client-info"."client-type"', i)
+                                    || ' ' || apex_json.get_varchar2('items[%d]."client-info"."client-os"', i)
+                                    || ' ' || apex_json.get_varchar2('items[%d]."client-info"."device-type"', i)
+                                    || ' ' || apex_json.get_varchar2('items[%d]."client-info"."client-name"', i)
                                              ), 1, 4000)
-        , client_user_agent    => substr(apex_json.get_varchar2('items[%d].client-info.user-agent', i), 1, 4000)
+        , client_user_agent    => substr(apex_json.get_varchar2('items[%d]."client-info"."user-agent"', i), 1, 4000)
         ));
     end loop;
     
@@ -1361,7 +1373,7 @@ begin
 
 end verbose;
 
-end mailgun_pkg1;
+end mailgun_pkg;
 /
 
 show errors

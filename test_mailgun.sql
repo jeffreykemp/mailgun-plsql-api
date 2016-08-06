@@ -1,4 +1,4 @@
--- mailgun sample code v0.4
+-- mailgun sample code v0.6
 
 -- Determine whether an email address is valid
 -- Expected output: "email is valid"
@@ -47,7 +47,7 @@ end;
 
 -- push the queue
 begin
-  mailgun_pkg.push_queue;
+  mailgun_pkg.push_queue (p_asynchronous => false);
 end;
 /
 
@@ -74,7 +74,8 @@ begin
                     || '}'
     ,p_priority     => 1
     );
-  mailgun_pkg.push_queue; -- this issues a commit
+  mailgun_pkg.push_queue;
+  commit;
 end;
 /
 
@@ -97,7 +98,8 @@ begin
                   || '<br>'
                   || 'Reference: ' || mailgun_pkg.recipient_id
     );
-  mailgun_pkg.push_queue; -- this issues a commit
+  mailgun_pkg.push_queue;
+  commit;
 exception
   when others then
     mailgun_pkg.reset; -- clear any recipients from memory
@@ -152,7 +154,8 @@ begin
                   || '</body></html>'
     );
 
-  mailgun_pkg.push_queue; -- this issues a commit
+  mailgun_pkg.push_queue;
+  commit;
 
 exception
   when others then
@@ -160,3 +163,36 @@ exception
     raise;
 end;
 /
+
+-- Get all stats for the last 7 days, by day:
+select * from table(mailgun_pkg.get_stats);
+
+-- Get all delivered for the last 24 hours, by hour:
+select * from table(mailgun_pkg.get_stats
+  (p_event_types => 'delivered'
+  ,p_resolution  => 'hour'
+  ,p_duration    => 24));
+
+-- Get all failed in the prior two months, by month:
+select * from table(mailgun_pkg.get_stats
+  (p_event_types => 'failed'
+  ,p_resolution  => 'month'
+  ,p_start_time  => add_months(trunc(sysdate,'MM'), -2)
+  ,p_end_time    => trunc(sysdate,'MM') - 0.00001
+  ));
+
+-- Get recent events log:
+select * from table(mailgun_pkg.get_events);
+
+-- Get failed emails, 50 records per API call:
+select * from table(mailgun_pkg.get_events
+  (p_page_size => 50
+  ,p_event     => 'failed'));
+
+-- Get emails successfully sent to anyone with a gmail or hotmail address on a particular day:
+select * from table(mailgun_pkg1.get_events
+  (p_event      => 'delivered'
+  ,p_start_time => date'2016-08-05'
+  ,p_end_time   => date'2016-08-06' - 0.00001
+  ,p_recipient  => 'gmail OR hotmail'
+  ));
