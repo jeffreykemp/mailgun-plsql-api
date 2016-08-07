@@ -1,5 +1,5 @@
 prompt uninstall.sql
--- v0.6
+-- v0.4
 
 prompt drop job
 begin dbms_scheduler.stop_job ('mailgun_process_queue'); exception when others then if sqlcode not in (-27366,-27475) then raise; end if; end;
@@ -29,14 +29,6 @@ begin execute immediate 'drop type t_mailgun_recipient_arr'; exception when othe
 begin execute immediate 'drop type t_mailgun_attachment'; exception when others then if sqlcode!=-4043 then raise; end if; end;
 /
 begin execute immediate 'drop type t_mailgun_recipient'; exception when others then if sqlcode!=-4043 then raise; end if; end;
-/
-begin execute immediate 'drop type t_mailgun_stat_arr'; exception when others then if sqlcode!=-4043 then raise; end if; end;
-/
-begin execute immediate 'drop type t_mailgun_stat'; exception when others then if sqlcode!=-4043 then raise; end if; end;
-/
-begin execute immediate 'drop type t_mailgun_event_arr'; exception when others then if sqlcode!=-4043 then raise; end if; end;
-/
-begin execute immediate 'drop type t_mailgun_event'; exception when others then if sqlcode!=-4043 then raise; end if; end;
 /
 
 prompt drop package

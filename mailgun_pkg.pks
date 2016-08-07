@@ -1,9 +1,6 @@
 create or replace package mailgun_pkg is
 /* mailgun API v0.6
   by Jeffrey Kemp
-  
-  Refer to https://github.com/jeffreykemp/mailgun-plsql-api for detailed
-  installation instructions and API reference.
 */
 
 -- Substitution Strings supported by Mailgun
@@ -25,18 +22,30 @@ recipient_last_name     constant varchar2(100) := '%recipient.last_name%';
 recipient_id            constant varchar2(100) := '%recipient.id%';
 
 -- default parameters
+default_no_change       constant varchar2(4000) := '*NO-CHANGE*';
 default_priority        constant integer := 3;
 default_repeat_interval constant varchar2(200) := 'FREQ=MINUTELY;INTERVAL=5;';
 default_purge_msg_state constant varchar2(100) := 'EXPIRED';
 default_max_retries     constant number := 10; --allow failures before giving up on a message
 default_retry_delay     constant number := 10; --wait seconds before trying this message again
-default_page_size       constant number := 20;
+default_page_size       constant number := 20; --rows to fetch per API call
 
 -- mail datetime format
 datetime_format         constant varchar2(100) := 'Dy, dd Mon yyyy hh24:mi:ss tzh:tzm';
 
 -- copy of utl_tcp.crlf for convenience
 crlf                    constant varchar2(2) := chr(13) || chr(10);
+
+-- init: set up mailgun parameters
+--   default is to not change the given parameter
+procedure init
+  (p_public_api_key  in varchar2 := default_no_change
+  ,p_private_api_key in varchar2 := default_no_change
+  ,p_my_domain       in varchar2 := default_no_change
+  ,p_api_url         in varchar2 := default_no_change
+  ,p_wallet_path     in varchar2 := default_no_change
+  ,p_wallet_password in varchar2 := default_no_change
+  );
 
 -- validate_email: validate an email address (procedure version)
 --   p_address:    email address to validate
@@ -60,7 +69,7 @@ function email_is_valid (p_address in varchar2) return boolean;
 -- or attach() procedures before calling this)
 procedure send_email
   (p_from_name    in varchar2  := null
-  ,p_from_email   in varchar2
+  ,p_from_email   in varchar2  := null             -- default is EMAIL_SENDER
   ,p_reply_to     in varchar2  := null
   ,p_to_name      in varchar2  := null
   ,p_to_email     in varchar2  := null             -- optional if the send_xx have been called already
@@ -138,13 +147,17 @@ procedure drop_queue;
 procedure purge_queue (p_msg_state in varchar2 := default_purge_msg_state);
 
 -- send emails in the queue
-procedure push_queue (p_asynchronous in boolean := true);
+procedure push_queue
+  (p_asynchronous in boolean := false);
+
+-- resend emails stuck in "Expired" status
+PROCEDURE re_enqueue;
 
 -- create a job to periodically call push_queue
 procedure create_job
   (p_repeat_interval in varchar2 := default_repeat_interval);
 
--- drop the job
+-- drop the jobs
 procedure drop_job;
 
 -- get mailgun stats
@@ -214,9 +227,6 @@ procedure delete_unsubscribe
 
 -- remove an email address from the complaint list
 procedure delete_complaint (p_email_address in varchar2);
-
--- set verbose option on/off
-procedure verbose (p_on in boolean := true);
 
 end mailgun_pkg;
 /

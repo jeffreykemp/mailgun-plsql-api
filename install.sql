@@ -1,5 +1,5 @@
 prompt install.sql
-prompt mailgun v0.5
+prompt mailgun v0.6
 -- run this script in the schema in which you wish the objects to be installed.
 
 @create_tables.sql
