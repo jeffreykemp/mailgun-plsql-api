@@ -24,11 +24,9 @@ recipient_first_name    constant varchar2(100) := '%recipient.first_name%';
 recipient_last_name     constant varchar2(100) := '%recipient.last_name%';
 recipient_id            constant varchar2(100) := '%recipient.id%';
 
--- default queue priority
-priority_default        constant integer := 3;
-
 -- default parameters
-repeat_interval_default constant varchar2(200) := 'FREQ=MINUTELY;INTERVAL=5;';
+default_priority        constant integer := 3;
+default_repeat_interval constant varchar2(200) := 'FREQ=MINUTELY;INTERVAL=5;';
 default_purge_msg_state constant varchar2(100) := 'EXPIRED';
 default_max_retries     constant number := 10; --allow failures before giving up on a message
 default_retry_delay     constant number := 10; --wait seconds before trying this message again
@@ -72,7 +70,7 @@ procedure send_email
   ,p_message      in clob                          -- html allowed
   ,p_tag          in varchar2  := null
   ,p_mail_headers in varchar2  := null             -- json structure of tag/value pairs
-  ,p_priority     in number    := priority_default -- lower numbers are processed first
+  ,p_priority     in number    := default_priority -- lower numbers are processed first
   );
 
 -- call these BEFORE send_email to add multiple recipients
@@ -144,7 +142,7 @@ procedure push_queue (p_asynchronous in boolean := true);
 
 -- create a job to periodically call push_queue
 procedure create_job
-  (p_repeat_interval in varchar2 := repeat_interval_default);
+  (p_repeat_interval in varchar2 := default_repeat_interval);
 
 -- drop the job
 procedure drop_job;

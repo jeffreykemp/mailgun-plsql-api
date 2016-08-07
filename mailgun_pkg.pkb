@@ -765,7 +765,7 @@ procedure send_email
   ,p_message      in clob                          -- html allowed
   ,p_tag          in varchar2  := null
   ,p_mail_headers in varchar2  := null             -- json structure of tag/value pairs
-  ,p_priority     in number    := priority_default -- lower numbers are processed first
+  ,p_priority     in number    := default_priority -- lower numbers are processed first
   ) is
   enq_opts        dbms_aq.enqueue_options_t;
   enq_msg_props   dbms_aq.message_properties_t;
@@ -1050,7 +1050,7 @@ exception
 end push_queue;
 
 procedure create_job
-  (p_repeat_interval in varchar2 := repeat_interval_default) is
+  (p_repeat_interval in varchar2 := default_repeat_interval) is
 begin
   msg('create_job ' || job_name);
   
@@ -1302,72 +1302,6 @@ begin
   return arr;
 end get_tag_stats;
 
--- return a comma-delimited string based on the array found at p_path (must already contain a %d), with
--- all values for the given attribute
-function json_arr_str
-  (p_path in varchar2
-  ,p0     in varchar2
-  ,p_attr in varchar2
-  ) return varchar2 is
-  cnt number;
-  buf varchar2(32767);
-begin
-  cnt := apex_json.get_count(p_path, p0);
-  for i in 1..cnt loop
-    if buf is not null then
-      buf := buf || ',';
-    end if;
-    buf := buf || apex_json.get_varchar2(p_path || '[%d].' || p_attr, p0, i);
-  end loop;
-  return buf;
-end json_arr_str;
-
--- comma-delimited list of attributes
-function json_members_list
-  (p_path in varchar2
-  ,p0     in varchar2
-  ) return varchar2 is
-  arr wwv_flow_t_varchar2;
-  buf varchar2(32767);
-begin
-  arr := apex_json.get_members(p_path, p0);
-  if arr.count > 0 then
-    for i in 1..arr.count loop
-      if buf is not null then
-        buf := buf || ',';
-      end if;
-      buf := buf || arr(i);
-    end loop;
-  end if;
-  return buf;
-exception
-  when value_error /*not an array or object*/ then
-    return null;
-end json_members_list;
-
--- comma-delimited list of attribute/value pairs
-function json_value_pairs
-  (p_path in varchar2
-  ,p0     in varchar2
-  ) return varchar2 is
-  arr wwv_flow_t_varchar2;
-  buf varchar2(32767);
-begin
-  arr := apex_json.get_members(p_path, p0);
-  if arr.count > 0 then
-    for i in 1..arr.count loop
-      if buf is not null then
-        buf := buf || ',';
-      end if;
-      buf := buf || arr(i) || ':' || apex_json.get_varchar2(p_path || '.' || arr(i), p0);
-    end loop;
-  end if;
-  return buf;
-exception
-  when value_error /*not an array or object*/ then
-    return null;
-end json_value_pairs;
-
 function get_events
   (p_start_time      in date     := null
   ,p_end_time        in date     := null
@@ -1384,6 +1318,53 @@ function get_events
   str  clob;
   cnt  number;
   url  varchar2(4000);
+
+  -- return a comma-delimited string based on the array found at p_path (must already contain a %d), with
+  -- all values for the given attribute
+  function json_arr_csv
+    (p_path in varchar2
+    ,p0     in varchar2
+    ,p_attr in varchar2
+    ) return varchar2 is
+    cnt number;
+    buf varchar2(32767);
+  begin
+    cnt := apex_json.get_count(p_path, p0);
+    for i in 1..cnt loop
+      if buf is not null then
+        buf := buf || ',';
+      end if;
+      buf := buf || apex_json.get_varchar2(p_path || '[%d].' || p_attr, p0, i);
+    end loop;
+    return buf;
+  end json_arr_csv;
+  
+  -- comma-delimited list of attributes, plus values if required
+  function json_members_csv
+    (p_path   in varchar2
+    ,p0       in varchar2
+    ,p_values in boolean
+    ) return varchar2 is
+    arr wwv_flow_t_varchar2;
+    buf varchar2(32767);
+  begin
+    arr := apex_json.get_members(p_path, p0);
+    if arr.count > 0 then
+      for i in 1..arr.count loop
+        if buf is not null then
+          buf := buf || ',';
+        end if;
+        buf := buf || arr(i);
+        if p_values then
+          buf := buf || '=' || apex_json.get_varchar2(p_path || '.' || arr(i), p0);
+        end if;
+      end loop;
+    end if;
+    return buf;
+  exception
+    when value_error /*not an array or object*/ then
+      return null;
+  end json_members_csv;
 
 begin
   assert(p_page_size <= 300, 'p_page_size cannot be greater than 300 (' || p_page_size || ')');
@@ -1425,11 +1406,11 @@ begin
         , sender               => substr(apex_json.get_varchar2('items[%d].envelope.sender', i), 1, 4000)
         , recipient            => substr(apex_json.get_varchar2('items[%d].recipient', i), 1, 4000)
         , subject              => substr(apex_json.get_varchar2('items[%d].message.headers.subject', i), 1, 4000)
-        , attachments          => substr(json_arr_str('items[%d].message.attachments', i, 'filename'), 1, 4000)
+        , attachments          => substr(json_arr_csv('items[%d].message.attachments', i, 'filename'), 1, 4000)
         , size_bytes           => apex_json.get_number('items[%d].message.size', i)
         , method               => substr(apex_json.get_varchar2('items[%d].method', i), 1, 100)
-        , tags                 => substr(json_members_list('items[%d].tags', i), 1, 4000)
-        , user_variables       => substr(json_value_pairs('items[%d]."user-variables"', i), 1, 4000)
+        , tags                 => substr(json_members_csv('items[%d].tags', i, p_values => false), 1, 4000)
+        , user_variables       => substr(json_members_csv('items[%d]."user-variables"', i, p_values => true), 1, 4000)
         , log_level            => substr(apex_json.get_varchar2('items[%d]."log-level"', i), 1, 100)
         , failed_severity      => substr(apex_json.get_varchar2('items[%d].severity', i), 1, 100)
         , failed_reason        => substr(apex_json.get_varchar2('items[%d].reason', i), 1, 100)
