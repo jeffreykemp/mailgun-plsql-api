@@ -1191,7 +1191,7 @@ begin
 
   dbms_scheduler.set_attribute(job_name,'restartable',true);
 
-  dbms_scheduler.enable(job_name);
+  dbms_scheduler.enable(purge_job_name);
 
 end create_purge_job;
 
