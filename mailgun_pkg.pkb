@@ -17,13 +17,15 @@ payload_type      constant varchar2(30) := sys_context('userenv','current_schema
 max_dequeue_count constant integer := 1000;
 
 -- mailgun setting names
-setting_public_api_key     constant varchar2(100) := 'public_api_key';
-setting_private_api_key    constant varchar2(100) := 'private_api_key';
-setting_my_domain          constant varchar2(100) := 'my_domain';
-setting_api_url            constant varchar2(100) := 'api_url';
-setting_wallet_path        constant varchar2(100) := 'wallet_path';
-setting_wallet_password    constant varchar2(100) := 'wallet_password';
-setting_log_retention_days constant varchar2(100) := 'log_retention_days';
+setting_public_api_key         constant varchar2(100) := 'public_api_key';
+setting_private_api_key        constant varchar2(100) := 'private_api_key';
+setting_my_domain              constant varchar2(100) := 'my_domain';
+setting_api_url                constant varchar2(100) := 'api_url';
+setting_wallet_path            constant varchar2(100) := 'wallet_path';
+setting_wallet_password        constant varchar2(100) := 'wallet_password';
+setting_log_retention_days     constant varchar2(100) := 'log_retention_days';
+setting_default_sender_name    constant varchar2(100) := 'default_sender_name';
+setting_default_sender_email   constant varchar2(100) := 'default_sender_email';
 
 g_recipient       t_mailgun_recipient_arr;
 g_attachment      t_mailgun_attachment_arr;
@@ -743,13 +745,15 @@ end send_email;
 ******************************************************************************/
 
 procedure init
-  (p_public_api_key     in varchar2 := default_no_change
-  ,p_private_api_key    in varchar2 := default_no_change
-  ,p_my_domain          in varchar2 := default_no_change
-  ,p_api_url            in varchar2 := default_no_change
-  ,p_wallet_path        in varchar2 := default_no_change
-  ,p_wallet_password    in varchar2 := default_no_change
-  ,p_log_retention_days in number := null
+  (p_public_api_key       in varchar2 := default_no_change
+  ,p_private_api_key      in varchar2 := default_no_change
+  ,p_my_domain            in varchar2 := default_no_change
+  ,p_api_url              in varchar2 := default_no_change
+  ,p_wallet_path          in varchar2 := default_no_change
+  ,p_wallet_password      in varchar2 := default_no_change
+  ,p_log_retention_days   in number := null
+  ,p_default_sender_name  in varchar2 := default_no_change
+  ,p_default_sender_email in varchar2 := default_no_change
   ) is
 begin
   
@@ -779,6 +783,14 @@ begin
 
   if p_log_retention_days is not null then
     set_setting(setting_log_retention_days, p_log_retention_days);
+  end if;
+
+  if nvl(p_default_sender_name,'*') != default_no_change then
+    set_setting(setting_default_sender_name, p_default_sender_name);
+  end if;
+
+  if nvl(p_default_sender_email,'*') != default_no_change then
+    set_setting(setting_default_sender_email, p_default_sender_email);
   end if;
 
 end init;
@@ -825,7 +837,7 @@ end email_is_valid;
 
 procedure send_email
   (p_from_name    in varchar2  := null
-  ,p_from_email   in varchar2  := null             -- default is EMAIL_SENDER
+  ,p_from_email   in varchar2  := null
   ,p_reply_to     in varchar2  := null
   ,p_to_name      in varchar2  := null
   ,p_to_email     in varchar2  := null             -- optional if the send_xx have been called already
@@ -841,6 +853,8 @@ procedure send_email
   enq_msg_props   dbms_aq.message_properties_t;
   payload         t_mailgun_email;
   msgid           raw(16);
+  l_from_name     varchar2(200);
+  l_from_email    varchar2(512);
 begin
 
   if p_to_email is not null then
@@ -849,7 +863,19 @@ begin
     assert(rcpt_count > 0, 'must be at least one recipient');
   end if;
   
-  val_email_min(p_from_email);
+  l_from_name := p_from_name;
+  l_from_email := p_from_email;
+  
+  -- see if defaults were provided
+  if l_from_email is null then
+    -- this will raise an error - no sender email, can't send email
+    l_from_email := setting(setting_default_sender_email);
+    if l_from_name is null then
+      l_from_name := setting(setting_default_sender_name, l_from_email);
+    end if;
+  end if;
+
+  val_email_min(l_from_email);
   val_email_min(p_reply_to);
   val_email_min(p_to_email);
   val_email_min(p_cc);
@@ -857,8 +883,8 @@ begin
   
   payload := t_mailgun_email
     ( requested_ts => systimestamp
-    , from_name    => p_from_name
-    , from_email   => p_from_email
+    , from_name    => l_from_name
+    , from_email   => l_from_email
     , reply_to     => p_reply_to
     , to_name      => p_to_name
     , to_email     => p_to_email

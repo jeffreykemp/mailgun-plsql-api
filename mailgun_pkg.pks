@@ -40,13 +40,15 @@ crlf                          constant varchar2(2) := chr(13) || chr(10);
 -- init: set up mailgun parameters
 --   default is to not change the given parameter
 procedure init
-  (p_public_api_key     in varchar2 := default_no_change
-  ,p_private_api_key    in varchar2 := default_no_change
-  ,p_my_domain          in varchar2 := default_no_change
-  ,p_api_url            in varchar2 := default_no_change
-  ,p_wallet_path        in varchar2 := default_no_change
-  ,p_wallet_password    in varchar2 := default_no_change
-  ,p_log_retention_days in number := null
+  (p_public_api_key       in varchar2 := default_no_change
+  ,p_private_api_key      in varchar2 := default_no_change
+  ,p_my_domain            in varchar2 := default_no_change
+  ,p_api_url              in varchar2 := default_no_change
+  ,p_wallet_path          in varchar2 := default_no_change
+  ,p_wallet_password      in varchar2 := default_no_change
+  ,p_log_retention_days   in number := null
+  ,p_default_sender_name  in varchar2 := default_no_change
+  ,p_default_sender_email in varchar2 := default_no_change
   );
 
 -- validate_email: validate an email address (procedure version)
@@ -65,8 +67,7 @@ procedure validate_email
 --   returns true if address appears to be valid
 function email_is_valid (p_address in varchar2) return boolean;
 
--- send an email in the current session (synchronous)
--- (to send an email, use mailgun_aq_pkg.send_email)
+-- send an email
 -- (to add more recipients or attach files to the email, call the relevant send_xx()
 -- or attach() procedures before calling this)
 procedure send_email
