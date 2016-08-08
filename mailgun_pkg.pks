@@ -71,7 +71,7 @@ function email_is_valid (p_address in varchar2) return boolean;
 -- or attach() procedures before calling this)
 procedure send_email
   (p_from_name    in varchar2  := null
-  ,p_from_email   in varchar2  := null             -- default is EMAIL_SENDER
+  ,p_from_email   in varchar2  := null
   ,p_reply_to     in varchar2  := null
   ,p_to_name      in varchar2  := null
   ,p_to_email     in varchar2  := null             -- optional if the send_xx have been called already
