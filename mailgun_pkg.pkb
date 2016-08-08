@@ -858,7 +858,7 @@ begin
   payload := t_mailgun_email
     ( requested_ts => systimestamp
     , from_name    => p_from_name
-    , from_email   => nvl(p_from_email, site_parameter.get_value('EMAIL_SENDER'))
+    , from_email   => p_from_email
     , reply_to     => p_reply_to
     , to_name      => p_to_name
     , to_email     => p_to_email
