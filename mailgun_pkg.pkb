@@ -1,27 +1,29 @@
-create or replace package body mailgun_pkg1 is
+create or replace package body mailgun_pkg is
 /* mailgun API v0.6
   by Jeffrey Kemp
 */
 
-scope_prefix constant varchar2(31) := lower($$plsql_unit) || '.';
-
-default_api_url   constant varchar2(4000) := 'https://api.mailgun.net/v3/';
+-- default settings if these are not found in the settings table
+default_api_url            constant varchar2(4000) := 'https://api.mailgun.net/v3/';
+default_log_retention_days constant number := 30;
 
 boundary          constant varchar2(100) := '-----zdkgyl5aalom86symjq9y81s2jtorr';
 max_recipients    constant integer := 1000; -- mailgun limitation for recipient variables
 queue_name        constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue';
 queue_table       constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue_tab';
 job_name          constant varchar2(30) := 'mailgun_process_queue';
+purge_job_name    constant varchar2(30) := 'mailgun_purge_logs';
 payload_type      constant varchar2(30) := sys_context('userenv','current_schema')||'.t_mailgun_email';
 max_dequeue_count constant integer := 1000;
 
 -- mailgun setting names
-setting_public_api_key  constant varchar2(100) := 'public_api_key';
-setting_private_api_key constant varchar2(100) := 'private_api_key';
-setting_my_domain       constant varchar2(100) := 'my_domain';
-setting_api_url         constant varchar2(100) := 'api_url';
-setting_wallet_path     constant varchar2(100) := 'wallet_path';
-setting_wallet_password constant varchar2(100) := 'wallet_password';
+setting_public_api_key     constant varchar2(100) := 'public_api_key';
+setting_private_api_key    constant varchar2(100) := 'private_api_key';
+setting_my_domain          constant varchar2(100) := 'my_domain';
+setting_api_url            constant varchar2(100) := 'api_url';
+setting_wallet_path        constant varchar2(100) := 'wallet_path';
+setting_wallet_password    constant varchar2(100) := 'wallet_password';
+setting_log_retention_days constant varchar2(100) := 'log_retention_days';
 
 g_recipient       t_mailgun_recipient_arr;
 g_attachment      t_mailgun_attachment_arr;
@@ -97,6 +99,11 @@ function api_url return varchar2 is
 begin
   return setting(setting_api_url, p_default => default_api_url);
 end api_url;
+
+function log_retention_days return number is
+begin
+  return to_number(setting(setting_log_retention_days, p_default => default_log_retention_days));
+end log_retention_days;
 
 function enc_chars (m in varchar2) return varchar2 is
 begin
@@ -736,12 +743,13 @@ end send_email;
 ******************************************************************************/
 
 procedure init
-  (p_public_api_key  in varchar2 := default_no_change
-  ,p_private_api_key in varchar2 := default_no_change
-  ,p_my_domain       in varchar2 := default_no_change
-  ,p_api_url         in varchar2 := default_no_change
-  ,p_wallet_path     in varchar2 := default_no_change
-  ,p_wallet_password in varchar2 := default_no_change
+  (p_public_api_key     in varchar2 := default_no_change
+  ,p_private_api_key    in varchar2 := default_no_change
+  ,p_my_domain          in varchar2 := default_no_change
+  ,p_api_url            in varchar2 := default_no_change
+  ,p_wallet_path        in varchar2 := default_no_change
+  ,p_wallet_password    in varchar2 := default_no_change
+  ,p_log_retention_days in number := null
   ) is
 begin
   
@@ -767,6 +775,10 @@ begin
 
   if nvl(p_wallet_password,'*') != default_no_change then
     set_setting(setting_wallet_password, p_wallet_password);
+  end if;
+
+  if p_log_retention_days is not null then
+    set_setting(setting_log_retention_days, p_log_retention_days);
   end if;
 
 end init;
@@ -1125,6 +1137,53 @@ begin
   dbms_scheduler.drop_job (job_name);
 
 end drop_job;
+
+procedure purge_logs (p_log_retention_days in number := null) is
+  l_log_retention_days number;
+begin
+  l_log_retention_days := nvl(p_log_retention_days, log_retention_days);
+  
+  delete mailgun_email_log
+  where requested_ts < sysdate - l_log_retention_days;
+  
+  commit;
+end purge_logs;
+
+procedure create_purge_job
+  (p_repeat_interval in varchar2 := default_purge_repeat_interval) is
+begin
+
+  assert(p_repeat_interval is not null, 'create_purge_job: p_repeat_interval cannot be null');
+
+  dbms_scheduler.create_job
+    (job_name        => purge_job_name
+    ,job_type        => 'stored_procedure'
+    ,job_action      => $$PLSQL_UNIT||'.purge_logs'
+    ,start_date      => systimestamp
+    ,repeat_interval => p_repeat_interval
+    );
+
+  dbms_scheduler.set_attribute(job_name,'restartable',true);
+
+  dbms_scheduler.enable(job_name);
+
+end create_purge_job;
+
+procedure drop_purge_job is
+begin
+
+  begin
+    dbms_scheduler.stop_job (purge_job_name);
+  exception
+    when others then
+      if sqlcode != -27366 /*job already stopped*/ then
+        raise;
+      end if;
+  end;
+  
+  dbms_scheduler.drop_job (purge_job_name);
+
+end drop_purge_job;
 
 function get_epoch (p_date in date) return number as
   /*
@@ -1672,7 +1731,7 @@ begin
   -- normally it returns {"message":"Spam complaint has been removed"}
 end delete_complaint;
 
-end mailgun_pkg1;
+end mailgun_pkg;
 /
 
 show errors

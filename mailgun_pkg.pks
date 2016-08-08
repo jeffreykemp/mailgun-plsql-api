@@ -7,44 +7,46 @@ create or replace package mailgun_pkg is
 
 -- include this in your email to allow the recipient to unsubscribe from all
 -- emails from your server
-unsubscribe_link_all    constant varchar2(100) := '%unsubscribe_url%';
+unsubscribe_link_all          constant varchar2(100) := '%unsubscribe_url%';
 
 -- include this in your email, and set a tag in the call to send_email, to
 -- allow the recipient to unsubscribe from emails from your server with that tag
-unsubscribe_link_tag    constant varchar2(100) := '%tag_unsubscribe_url%';
+unsubscribe_link_tag          constant varchar2(100) := '%tag_unsubscribe_url%';
 
 -- include these in your email to substitute details about the recipient in the
 -- subject line or message body
-recipient_email         constant varchar2(100) := '%recipient.email%';
-recipient_name          constant varchar2(100) := '%recipient.name%';
-recipient_first_name    constant varchar2(100) := '%recipient.first_name%';
-recipient_last_name     constant varchar2(100) := '%recipient.last_name%';
-recipient_id            constant varchar2(100) := '%recipient.id%';
+recipient_email               constant varchar2(100) := '%recipient.email%';
+recipient_name                constant varchar2(100) := '%recipient.name%';
+recipient_first_name          constant varchar2(100) := '%recipient.first_name%';
+recipient_last_name           constant varchar2(100) := '%recipient.last_name%';
+recipient_id                  constant varchar2(100) := '%recipient.id%';
 
 -- default parameters
-default_no_change       constant varchar2(4000) := '*NO-CHANGE*';
-default_priority        constant integer := 3;
-default_repeat_interval constant varchar2(200) := 'FREQ=MINUTELY;INTERVAL=5;';
-default_purge_msg_state constant varchar2(100) := 'EXPIRED';
-default_max_retries     constant number := 10; --allow failures before giving up on a message
-default_retry_delay     constant number := 10; --wait seconds before trying this message again
-default_page_size       constant number := 20; --rows to fetch per API call
+default_no_change             constant varchar2(4000) := '*NO-CHANGE*';
+default_priority              constant integer := 3;
+default_repeat_interval       constant varchar2(200) := 'FREQ=MINUTELY;INTERVAL=5;';
+default_purge_repeat_interval constant varchar2(200) := 'FREQ=WEEKLY;BYDAY=SUN;BYHOUR=0;';
+default_purge_msg_state       constant varchar2(100) := 'EXPIRED';
+default_max_retries           constant number := 10; --allow failures before giving up on a message
+default_retry_delay           constant number := 10; --wait seconds before trying this message again
+default_page_size             constant number := 20; --rows to fetch per API call
 
 -- mail datetime format
-datetime_format         constant varchar2(100) := 'Dy, dd Mon yyyy hh24:mi:ss tzh:tzm';
+datetime_format               constant varchar2(100) := 'Dy, dd Mon yyyy hh24:mi:ss tzh:tzm';
 
 -- copy of utl_tcp.crlf for convenience
-crlf                    constant varchar2(2) := chr(13) || chr(10);
+crlf                          constant varchar2(2) := chr(13) || chr(10);
 
 -- init: set up mailgun parameters
 --   default is to not change the given parameter
 procedure init
-  (p_public_api_key  in varchar2 := default_no_change
-  ,p_private_api_key in varchar2 := default_no_change
-  ,p_my_domain       in varchar2 := default_no_change
-  ,p_api_url         in varchar2 := default_no_change
-  ,p_wallet_path     in varchar2 := default_no_change
-  ,p_wallet_password in varchar2 := default_no_change
+  (p_public_api_key     in varchar2 := default_no_change
+  ,p_private_api_key    in varchar2 := default_no_change
+  ,p_my_domain          in varchar2 := default_no_change
+  ,p_api_url            in varchar2 := default_no_change
+  ,p_wallet_path        in varchar2 := default_no_change
+  ,p_wallet_password    in varchar2 := default_no_change
+  ,p_log_retention_days in number := null
   );
 
 -- validate_email: validate an email address (procedure version)
@@ -157,8 +159,18 @@ PROCEDURE re_enqueue;
 procedure create_job
   (p_repeat_interval in varchar2 := default_repeat_interval);
 
--- drop the jobs
+-- drop the push_queue job
 procedure drop_job;
+
+-- purge the logs older than the given number of days
+procedure purge_logs (p_log_retention_days in number := null);
+
+-- create a job to periodically call purge_logs
+procedure create_purge_job
+  (p_repeat_interval in varchar2 := default_purge_repeat_interval);
+
+-- drop the purge_logs job
+procedure drop_purge_job;
 
 -- get mailgun stats
 function get_stats
