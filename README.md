@@ -9,7 +9,7 @@ The API provides methods to:
   * **validate an email address** - does the same thing as the [jQuery-based Apex plugin](https://github.com/jeffreykemp/jk64-plugin-mailgunemailvalidator), except from the server
   
   * **send an email**
-    > *NOTE: another alternative (one that also works with Apex's builtin emails is to use the mailgun SMTP interface instead.*
+    > *NOTE: another alternative (one that also works with Oracle Apex's builtin email system) is to use the mailgun SMTP interface instead.*
 
   * query your mailgun usage and failure **statistics**
 
