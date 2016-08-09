@@ -47,7 +47,7 @@ end;
 
 -- push the queue
 begin
-  mailgun_pkg.push_queue (p_asynchronous => false);
+  mailgun_pkg.push_queue;
 end;
 /
 
