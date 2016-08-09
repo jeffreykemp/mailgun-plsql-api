@@ -28,7 +28,7 @@ default_repeat_interval       constant varchar2(200) := 'FREQ=MINUTELY;INTERVAL=
 default_purge_repeat_interval constant varchar2(200) := 'FREQ=WEEKLY;BYDAY=SUN;BYHOUR=0;';
 default_purge_msg_state       constant varchar2(100) := 'EXPIRED';
 default_max_retries           constant number := 10; --allow failures before giving up on a message
-default_retry_delay           constant number := 10; --wait seconds before trying this message again
+default_retry_delay           constant number := 60; --wait seconds before trying this message again
 default_page_size             constant number := 20; --rows to fetch per API call
 
 -- mail datetime format
@@ -49,6 +49,7 @@ procedure init
   ,p_log_retention_days   in number := null
   ,p_default_sender_name  in varchar2 := default_no_change
   ,p_default_sender_email in varchar2 := default_no_change
+  ,p_queue_expiration     in number := null
   );
 
 -- validate_email: validate an email address (procedure version)
@@ -153,9 +154,6 @@ procedure purge_queue (p_msg_state in varchar2 := default_purge_msg_state);
 procedure push_queue
   (p_asynchronous in boolean := false);
 
--- resend emails stuck in "Expired" status
-PROCEDURE re_enqueue;
-
 -- create a job to periodically call push_queue
 procedure create_job
   (p_repeat_interval in varchar2 := default_repeat_interval);
@@ -180,7 +178,7 @@ function get_stats
   ,p_start_time      in date     := null  -- default is 7 days prior to end time
   ,p_end_time        in date     := null  -- default is now
   ,p_duration        in number   := null  -- backwards from p_end_time
-  ) return t_mailgun_stat_arr;
+  ) return t_mailgun_stat_arr pipelined;
 
 -- get mailgun stats for a tag
 function get_tag_stats
@@ -190,7 +188,7 @@ function get_tag_stats
   ,p_start_time      in date     := null  -- default is 7 days prior to end time
   ,p_end_time        in date     := null  -- default is now
   ,p_duration        in number   := null  -- backwards from p_end_time
-  ) return t_mailgun_stat_arr;
+  ) return t_mailgun_stat_arr pipelined;
 
 -- get mailgun event log
 -- filter expression examples - https://documentation.mailgun.com/api-events.html#filter-expression

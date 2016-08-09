@@ -1,7 +1,10 @@
 create or replace package body mailgun_pkg is
 /* mailgun API v0.6
+  Instrumented using Logger https://github.com/OraOpenSource/Logger
   by Jeffrey Kemp
 */
+
+scope_prefix constant varchar2(31) := lower($$plsql_unit) || '.';
 
 -- default settings if these are not found in the settings table
 default_api_url            constant varchar2(4000) := 'https://api.mailgun.net/v3/';
@@ -53,8 +56,13 @@ procedure set_setting
   (p_name  in varchar2
   ,p_value in varchar2
   ) is
+  scope logger_logs.scope%type := scope_prefix || 'set_setting';
+  params logger.tab_param;
 begin
-
+  logger.append_param(params,'p_name',p_name);
+  logger.append_param(params,'p_value',case when p_value is null then 'null' else 'not null' end);
+  logger.log('START', scope, null, params);
+  
   assert(p_name is not null, 'p_name cannot be null');
   
   merge into mailgun_settings t
@@ -68,8 +76,16 @@ begin
     insert (setting_name, setting_value)
     values (s.setting_name, s.setting_value);
   
+  logger.log('MERGE mailgun_settings: ' || SQL%ROWCOUNT, scope, null, params);
+  
+  logger.log('commit', scope, null, params);
   commit;
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end set_setting;
 
 -- get a setting
@@ -79,8 +95,12 @@ function setting
   (p_name    in varchar2
   ,p_default in varchar2 := null
   ) return varchar2 result_cache is
+  scope logger_logs.scope%type := scope_prefix || 'setting';
+  params logger.tab_param;
   p_value mailgun_settings.setting_value%type;
 begin
+  logger.append_param(params,'p_name',p_name);
+  logger.log('START', scope, null, params);
 
   assert(p_name is not null, 'p_name cannot be null');
   
@@ -89,14 +109,19 @@ begin
   from   mailgun_settings s
   where  s.setting_name = setting.p_name;
 
+  logger.log('END', scope, null, params);
   return nvl(p_value, p_default);
 exception
   when no_data_found then
     if p_default is not null then
       return p_default;
     else
+      logger.log_error('No Data Found', scope, null, params);
       raise_application_error(-20000, 'mailgun setting not set "' || p_name || '" - please setup using ' || $$plsql_unit || '.init()');
     end if;
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end setting;
 
 function api_url return varchar2 is
@@ -115,6 +140,8 @@ begin
 end enc_chars;
 
 function enc_chars (clob_content in clob) return clob is
+  scope logger_logs.scope%type := scope_prefix || 'enc_chars';
+  params logger.tab_param;
   file_len     pls_integer;
   modulo       pls_integer;
   pieces       pls_integer;
@@ -125,10 +152,13 @@ function enc_chars (clob_content in clob) return clob is
   counter      pls_integer         := 1;
   out_clob     clob;
 begin
+  logger.append_param(params,'clob_content.len',dbms_lob.getlength(clob_content));
+  logger.log('START', scope, null, params);
 
   assert(clob_content is not null, 'enc_chars: clob_content cannot be null');
   dbms_lob.createtemporary(out_clob, false, dbms_lob.call);
   file_len := dbms_lob.getlength (clob_content);
+  logger.log('enc_chars ' || file_len || ' bytes', scope, null, params);
   modulo := mod (file_len, amt);
   pieces := trunc (file_len / amt);  
   while (counter <= pieces) loop
@@ -144,15 +174,24 @@ begin
     dbms_lob.writeappend(out_clob, length(buf), buf);
   end if;
 
+  logger.log('END', scope, null, params);
   return out_clob;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end enc_chars;
 
 -- lengthb doesn't work directly for clobs, and dbms_lob.getlength returns number of chars, not bytes
 function clob_size_bytes (clob_content in clob) return integer is
+  scope      logger_logs.scope%type := scope_prefix || 'clob_size_bytes';
+  params     logger.tab_param;
   ret        integer := 0;
   chunks     integer;
   chunk_size constant integer := 2000;
 begin
+  logger.append_param(params,'clob_content.len',dbms_lob.getlength(clob_content));
+  logger.log('START', scope, null, params);
   
   chunks := ceil(dbms_lob.getlength(clob_content) / chunk_size);
   
@@ -160,7 +199,12 @@ begin
     ret := ret + lengthb(dbms_lob.substr(clob_content, amount => chunk_size, offset => (i-1)*chunk_size+1));
   end loop;
 
+  logger.log('END ret=' || ret, scope, null, params);
   return ret;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end clob_size_bytes;
 
 function utc_to_session_tz (ts in varchar2) return timestamp is
@@ -170,7 +214,11 @@ end utc_to_session_tz;
 
 -- do some minimal checking of the format of an email address without going to an external service
 procedure val_email_min (email in varchar2) is
+  scope logger_logs.scope%type := scope_prefix || 'val_email_min';
+  params logger.tab_param;
 begin
+  logger.append_param(params,'email',email);
+  logger.log('START', scope, null, params);
 
   if email is not null then
     if instr(email,'@') = 0 then
@@ -178,13 +226,41 @@ begin
     end if;
   end if;
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end val_email_min;
 
+procedure log_headers (resp in out nocopy utl_http.resp) is
+  scope logger_logs.scope%type := scope_prefix || 'log_headers';
+  params logger.tab_param;
+  name  varchar2(256);
+  value varchar2(1024);
+begin
+  logger.log('START', scope, null, params);
+
+  for i in 1..utl_http.get_header_count(resp) loop
+    utl_http.get_header(resp, i, name, value);
+    logger.log(name || ': ' || value, scope, null, params);
+  end loop;
+
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
+end log_headers;
+
 procedure set_wallet is
+  scope logger_logs.scope%type := scope_prefix || 'set_wallet';
+  params logger.tab_param;
   wallet_path     varchar2(4000);
   wallet_password varchar2(4000);
   default_null    constant varchar2(100) := '*NULL*';
 begin
+  logger.log('START', scope, null, params);
   
   wallet_path := setting(setting_wallet_path, p_default => default_null);
   wallet_password := setting(setting_wallet_password, p_default => default_null);
@@ -193,12 +269,20 @@ begin
     utl_http.set_wallet(wallet_path, wallet_password);
   end if;
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end set_wallet;
 
 function get_response (resp in out nocopy utl_http.resp) return clob is
+  scope logger_logs.scope%type := scope_prefix || 'get_response';
+  params logger.tab_param;
   buf varchar2(32767);
   ret clob := empty_clob;
 begin
+  logger.log('START', scope, null, params);
   
   dbms_lob.createtemporary(ret, true);
 
@@ -213,7 +297,12 @@ begin
   end;
   utl_http.end_response(resp);
 
+  logger.log('END', scope, ret, params);
   return ret;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end get_response;
 
 function get_json
@@ -223,11 +312,19 @@ function get_json
   ,p_pwd    in varchar2 := null
   ,p_method in varchar2 := 'GET'
   ) return clob is
+  scope logger_logs.scope%type := scope_prefix || 'get_json';
+  params logger.tab_param;
   url   varchar2(4000) := p_url;
   req   utl_http.req;
   resp  utl_http.resp;
   ret   clob;
 begin
+  logger.append_param(params,'p_url',p_url);
+  logger.append_param(params,'p_params',p_params);
+  logger.append_param(params,'p_user',p_user);
+  logger.append_param(params,'p_pwd',CASE WHEN p_pwd IS NOT NULL THEN '(not null)' ELSE 'NULL' END);
+  logger.append_param(params,'p_method',p_method);
+  logger.log('START', scope, null, params);
 
   assert(p_url is not null, 'get_json: p_url cannot be null');
   assert(p_method is not null, 'get_json: p_method cannot be null');
@@ -247,6 +344,9 @@ begin
   utl_http.set_header (req,'Accept','application/json');
 
   resp := utl_http.get_response(req);
+  logger.log('HTTP response: ' || resp.status_code || ' ' || resp.reason_phrase, scope, null, params);
+
+  log_headers(resp);
 
   if resp.status_code != '200' then
     raise_application_error(-20000, 'get_json call failed ' || resp.status_code || ' ' || resp.reason_phrase || ' [' || url || ']');
@@ -254,29 +354,50 @@ begin
 
   ret := get_response(resp);
 
+  logger.log('END', scope, ret, params);
   return ret;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end get_json;
 
 function rcpt_count return number is
+  scope  logger_logs.scope%type := scope_prefix || 'rcpt_count';
+  params logger.tab_param;
   ret    integer := 0;
 begin
+  logger.log('START', scope, null, params);
 
   if g_recipient is not null then
     ret := g_recipient.count;
   end if;
 
+  logger.log('END ' || ret, scope, null, params);
   return ret;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end rcpt_count;
 
 function attch_count return number is
+  scope logger_logs.scope%type := scope_prefix || 'attch_count';
+  params logger.tab_param;
   ret    integer := 0;
 begin
+  logger.log('START', scope, null, params);
 
   if g_attachment is not null then
     ret := g_attachment.count;
   end if;
 
+  logger.log('END ' || ret, scope, null, params);
   return ret;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end attch_count;
 
 procedure add_recipient
@@ -287,8 +408,17 @@ procedure add_recipient
   ,p_id         in varchar2
   ,p_send_by    in varchar2
   ) is
+  scope logger_logs.scope%type := scope_prefix || 'add_recipient';
+  params logger.tab_param;
   name varchar2(4000);
 begin
+  logger.append_param(params,'p_email',p_email);
+  logger.append_param(params,'p_name',p_name);
+  logger.append_param(params,'p_first_name',p_first_name);
+  logger.append_param(params,'p_last_name',p_last_name);
+  logger.append_param(params,'p_id',p_id);
+  logger.append_param(params,'p_send_by',p_send_by);
+  logger.log('START', scope, null, params);
 
   assert(rcpt_count < max_recipients, 'maximum recipients per email exceeded (' || max_recipients || ')');
   
@@ -324,6 +454,11 @@ begin
     , id          => p_id
     );
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end add_recipient;
 
 function attachment_header
@@ -331,8 +466,14 @@ function attachment_header
   ,p_content_type in varchar2
   ,p_inline       in boolean
   ) return varchar2 is
+  scope logger_logs.scope%type := scope_prefix || 'attachment_header';
+  params logger.tab_param;
   ret    varchar2(4000);
 begin
+  logger.append_param(params,'p_file_name',p_file_name);
+  logger.append_param(params,'p_content_type',p_content_type);
+  logger.append_param(params,'p_inline',p_inline);
+  logger.log('START', scope, null, params);
 
   assert(p_file_name is not null, 'attachment_header: p_file_name cannot be null');
   assert(p_content_type is not null, 'attachment_header: p_content_type cannot be null');
@@ -344,7 +485,12 @@ begin
     || 'Content-Type: ' || p_content_type || crlf
     || crlf;
 
+  logger.log('END', scope, null, params);
   return ret;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end attachment_header;
 
 procedure add_attachment
@@ -354,7 +500,15 @@ procedure add_attachment
   ,p_content_type in varchar2
   ,p_inline       in boolean
   ) is
+  scope logger_logs.scope%type := scope_prefix || 'add_attachment';
+  params logger.tab_param;
 begin
+  logger.append_param(params,'p_file_name',p_file_name);
+  logger.append_param(params,'p_blob_content',dbms_lob.getlength(p_blob_content));
+  logger.append_param(params,'p_clob_content',dbms_lob.getlength(p_clob_content));
+  logger.append_param(params,'p_content_type',p_content_type);
+  logger.append_param(params,'p_inline',p_inline);
+  logger.log('START', scope, null, params);
 
   if g_attachment is null then
     g_attachment := t_mailgun_attachment_arr();
@@ -370,37 +524,65 @@ begin
         ,p_inline       => p_inline)
     );
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end add_attachment;
 
 function field_header (p_tag in varchar2) return varchar2 is
+  scope logger_logs.scope%type := scope_prefix || 'field_header';
+  params logger.tab_param;
   ret    varchar2(4000);
 begin
+  logger.append_param(params,'p_tag',p_tag);
+  logger.log('START', scope, null, params);
 
   assert(p_tag is not null, 'field_header: p_tag cannot be null');
   ret := '--' || boundary || crlf
     || 'Content-Disposition: form-data; name="' || p_tag || '"' || crlf
     || crlf;
 
+  logger.log('END', scope, null, params);
   return ret;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end field_header;
 
 function form_field (p_tag in varchar2, p_data in varchar2) return varchar2 is
+  scope logger_logs.scope%type := scope_prefix || 'form_field';
+  params logger.tab_param;
   ret    varchar2(4000);
 begin
+  logger.append_param(params,'p_tag',p_tag);
+  logger.append_param(params,'p_data',p_data);
+  logger.log('START', scope, null, params);
 
   ret := case when p_data is not null
          then field_header(p_tag) || p_data || crlf
          end;
 
+  logger.log('END', scope, null, params);
   return ret;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end form_field;
 
 function render_mail_headers (p_mail_headers in varchar2) return varchar2 is
+  scope logger_logs.scope%type := scope_prefix || 'render_mail_headers';
+  params logger.tab_param;
   vals apex_json.t_values;
   tag  varchar2(32767);
   val  apex_json.t_value;
   buf  varchar2(32767);
 begin
+  logger.append_param(params,'p_mail_headers',p_mail_headers);
+  logger.log('START', scope, null, params);
 
   apex_json.parse(vals, p_mail_headers);
 
@@ -414,8 +596,10 @@ begin
     -- h:Priority
     case val.kind
     when apex_json.c_varchar2 then
+      logger.log('h:'||tag||' = ' || val.varchar2_value, scope, null, params);
       buf := buf || form_field('h:'||tag, val.varchar2_value);
     when apex_json.c_number then
+      logger.log('h:'||tag||' = ' || val.number_value, scope, null, params);
       buf := buf || form_field('h:'||tag, to_char(val.number_value));
     else
       null;
@@ -424,19 +608,37 @@ begin
     tag := vals.next(tag);
   end loop;
   
+  logger.log('END', scope, null, params);
   return buf;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end render_mail_headers;
 
 procedure write_text
   (req in out nocopy utl_http.req
   ,buf in varchar2) is
+  scope logger_logs.scope%type := scope_prefix || 'write_text';
+  params logger.tab_param;
 begin
+  logger.append_param(params,'buf',length(buf));
+  logger.log('START', scope, null, params);
+
   utl_http.write_text(req, buf);
+
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end write_text;
 
 procedure write_clob
   (req          in out nocopy utl_http.req
   ,file_content in clob) is
+  scope logger_logs.scope%type := scope_prefix || 'write_clob';
+  params logger.tab_param;
   file_len     pls_integer;
   modulo       pls_integer;
   pieces       pls_integer;
@@ -446,9 +648,12 @@ procedure write_clob
   filepos      pls_integer         := 1;
   counter      pls_integer         := 1;
 begin
+  logger.append_param(params,'file_content',dbms_lob.getlength(file_content));
+  logger.log('START', scope, null, params);
 
   assert(file_content is not null, 'write_clob: file_content cannot be null');
   file_len := dbms_lob.getlength (file_content);
+  logger.log('write_clob ' || file_len || ' chars', scope, null, params);
   modulo := mod (file_len, amt);
   pieces := trunc (file_len / amt);  
   while (counter <= pieces) loop
@@ -462,11 +667,18 @@ begin
     write_text(req, buf);
   end if;
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end write_clob;
 
 procedure write_blob
   (req          in out nocopy utl_http.req
   ,file_content in out nocopy blob) is
+  scope logger_logs.scope%type := scope_prefix || 'write_blob';
+  params logger.tab_param;
   file_len     pls_integer;
   modulo       pls_integer;
   pieces       pls_integer;
@@ -476,9 +688,12 @@ procedure write_blob
   filepos      pls_integer         := 1;
   counter      pls_integer         := 1;
 begin
+  logger.append_param(params,'file_content',dbms_lob.getlength(file_content));
+  logger.log('START', scope, null, params);
 
   assert(file_content is not null, 'write_blob: file_content cannot be null');
   file_len := dbms_lob.getlength (file_content);
+  logger.log('write_blob ' || file_len || ' bytes', scope, null, params);
   modulo := mod (file_len, amt);
   pieces := trunc (file_len / amt);  
   while (counter <= pieces) loop
@@ -492,9 +707,16 @@ begin
     utl_http.write_raw(req, buf);
   end if;
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end write_blob;
 
 procedure send_email (p_payload in out nocopy t_mailgun_email) is
+  scope logger_logs.scope%type := scope_prefix || 'send_email';
+  params logger.tab_param;
   url              varchar2(32767) := api_url || setting(setting_my_domain) || '/messages';
   header           clob;
   sender           varchar2(4000);
@@ -540,6 +762,7 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
     -- needs to commit the log entry independently of calling transaction
     pragma autonomous_transaction;
   begin
+    logger.log('log_response', scope, null, params);
 
     log.sent_ts         := systimestamp;
     log.requested_ts    := p_payload.requested_ts;
@@ -560,13 +783,19 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
     log.mailgun_id      := apex_json.get_varchar2('id');
     log.mailgun_message := apex_json.get_varchar2('message');
     
-    insert into mailgun_email_log values log;
+    logger.log('response: ' || log.mailgun_message, scope, null, params);
+    logger.log('msg id: ' || log.mailgun_id, scope, null, params);
 
+    insert into mailgun_email_log values log;
+    logger.log('inserted mailgun_email_log: ' || sql%rowcount, scope, null, params);
+
+    logger.log('commit', scope, null, params);
     commit;
     
   end log_response;
 
 begin
+  logger.log('START', scope, null, params);
 
   assert(p_payload.from_email is not null, 'send_email: from_email cannot be null');
   
@@ -690,6 +919,8 @@ begin
     end loop;
   end if;
   
+  logger.log('content_length=' || log.total_bytes, scope, null, params);
+
   -- Turn off checking of status code. We will check it by ourselves.
   utl_http.set_response_error_check(false);
 
@@ -701,6 +932,8 @@ begin
   
   utl_http.set_header(req, 'Content-Type', 'multipart/form-data; boundary="' || boundary || '"');
   utl_http.set_header(req, 'Content-Length', log.total_bytes);
+  
+  logger.log('writing message contents...', scope, null, params);
   
   write_clob(req, header);
 
@@ -725,13 +958,18 @@ begin
   write_text(req, footer);
 
   begin
+    logger.log('reading response from server...', scope, null, params);
     resp := utl_http.get_response(req);
     
+    log_headers(resp);
+
     if resp.status_code = utl_http.http_unauthorized then
       utl_http.get_authentication(resp, my_scheme, my_realm, false);
+      logger.log('Unauthorized: please supply the required ' || my_scheme || ' authentication username/password for realm ' || my_realm || '.', scope, null, params);
       raise_application_error(-20000, 'unauthorized');
     elsif resp.status_code = utl_http.http_proxy_auth_required then
       utl_http.get_authentication(resp, my_scheme, my_realm, true);
+      logger.log('Proxy auth required: please supplied the required ' || my_scheme || ' authentication username/password for realm ' || my_realm || '.', scope, null, params);
       raise_application_error(-20000, 'proxy auth required');
     end if;
     
@@ -754,8 +992,10 @@ begin
 
   log_response;
   
+  logger.log('END', scope, null, params);
 exception
   when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
     begin
       if header is not null then
         dbms_lob.freetemporary(header);
@@ -786,7 +1026,12 @@ begin
 end epoch_to_dt;
 
 procedure url_param (buf in out varchar2, attr in varchar2, val in varchar2) is
+  scope  logger_logs.scope%type := scope_prefix || 'url_param(1)';
+  params logger.tab_param;
 begin
+  logger.append_param(params,'attr',attr);
+  logger.append_param(params,'val',val);
+  logger.log('START', scope, null, params);
 
   if val is not null then
     if buf is not null then
@@ -795,10 +1040,20 @@ begin
     buf := buf || attr || '=' || apex_util.url_encode(val);
   end if;
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end url_param;
 
 procedure url_param (buf in out varchar2, attr in varchar2, dt in date) is
+  scope  logger_logs.scope%type := scope_prefix || 'url_param(2)';
+  params logger.tab_param;
 begin
+  logger.append_param(params,'attr',attr);
+  logger.append_param(params,'dt',dt);
+  logger.log('START', scope, null, params);
 
   if dt is not null then
     if buf is not null then
@@ -807,6 +1062,11 @@ begin
     buf := buf || attr || '=' || get_epoch(dt);
   end if;
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end url_param;
 
 -- return a comma-delimited string based on the array found at p_path (must already contain a %d), with
@@ -816,9 +1076,15 @@ function json_arr_csv
   ,p0     in varchar2
   ,p_attr in varchar2
   ) return varchar2 is
+  scope  logger_logs.scope%type := scope_prefix || 'json_arr_csv';
+  params logger.tab_param;
   cnt    number;
   buf    varchar2(32767);
 begin
+  logger.append_param(params,'p_path',p_path);
+  logger.append_param(params,'p0',p0);
+  logger.append_param(params,'p_attr',p_attr);
+  logger.log('START', scope, null, params);
 
   cnt := apex_json.get_count(p_path, p0);
   for i in 1..cnt loop
@@ -828,7 +1094,12 @@ begin
     buf := buf || apex_json.get_varchar2(p_path || '[%d].' || p_attr, p0, i);
   end loop;
 
+  logger.log('END', scope, null, params);
   return buf;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end json_arr_csv;
 
 -- comma-delimited list of attributes, plus values if required
@@ -837,9 +1108,15 @@ function json_members_csv
   ,p0       in varchar2
   ,p_values in boolean
   ) return varchar2 is
+  scope  logger_logs.scope%type := scope_prefix || 'json_members_csv';
+  params logger.tab_param;
   arr wwv_flow_t_varchar2;
   buf varchar2(32767);
 begin
+  logger.append_param(params,'p_path',p_path);
+  logger.append_param(params,'p0',p0);
+  logger.append_param(params,'p_values',p_values);
+  logger.log('START', scope, null, params);
 
   arr := apex_json.get_members(p_path, p0);
   if arr.count > 0 then
@@ -854,10 +1131,15 @@ begin
     end loop;
   end if;
 
+  logger.log('END', scope, null, params);
   return buf;
 exception
   when value_error /*not an array or object*/ then
+    logger.log('END value_error', scope, null, params);
     return null;
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end json_members_csv;
 
 /******************************************************************************
@@ -878,7 +1160,20 @@ procedure init
   ,p_default_sender_email in varchar2 := default_no_change
   ,p_queue_expiration     in number := null
   ) is
+  scope logger_logs.scope%type := scope_prefix || 'init';
+  params logger.tab_param;
 begin
+  logger.append_param(params,'p_public_api_key',p_public_api_key);
+  logger.append_param(params,'p_private_api_key',case when p_private_api_key is null then 'null' else 'not null' end);
+  logger.append_param(params,'p_my_domain',p_my_domain);
+  logger.append_param(params,'p_api_url',p_api_url);
+  logger.append_param(params,'p_wallet_path',p_wallet_path);
+  logger.append_param(params,'p_wallet_password',case when p_wallet_password is null then 'null' else 'not null' end);
+  logger.append_param(params,'p_log_retention_days',p_log_retention_days);
+  logger.append_param(params,'p_default_sender_name',p_default_sender_name);
+  logger.append_param(params,'p_default_sender_email',p_default_sender_email);
+  logger.append_param(params,'p_queue_expiration',p_queue_expiration);  
+  logger.log('START', scope, null, params);
   
   if nvl(p_public_api_key,'*') != default_no_change then
     set_setting(setting_public_api_key, p_public_api_key);
@@ -920,6 +1215,11 @@ begin
     set_setting(setting_queue_expiration, p_queue_expiration);
   end if;
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end init;
 
 procedure validate_email
@@ -927,9 +1227,13 @@ procedure validate_email
   ,p_is_valid   out boolean
   ,p_suggestion out varchar2
   ) is
+  scope logger_logs.scope%type := scope_prefix || 'validate_email';
+  params logger.tab_param;
   str          clob;
   is_valid_str varchar2(100);
 begin
+  logger.append_param(params,'p_address',p_address);
+  logger.log('START', scope, null, params);
 
   assert(p_address is not null, 'validate_email: p_address cannot be null');
   
@@ -941,26 +1245,44 @@ begin
   
   apex_json.parse(str);
 
+  logger.log('address=' || apex_json.get_varchar2('address'), scope, null, params);
 
   is_valid_str := apex_json.get_varchar2('is_valid');
+  logger.log('is_valid_str=' || is_valid_str, scope, null, params);
   
   p_is_valid := is_valid_str = 'true';
 
   p_suggestion := apex_json.get_varchar2('did_you_mean');
 
+  logger.append_param(params,'p_is_valid',p_is_valid);
+  logger.append_param(params,'p_suggestion',p_suggestion);
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end validate_email;
 
 function email_is_valid (p_address in varchar2) return boolean is
+  scope logger_logs.scope%type := scope_prefix || 'email_is_valid';
+  params logger.tab_param;
   is_valid   boolean;
   suggestion varchar2(512);  
 begin
+  logger.append_param(params,'p_address',p_address);
+  logger.log('START', scope, null, params);
 
   validate_email
     (p_address    => p_address
     ,p_is_valid   => is_valid
     ,p_suggestion => suggestion);
 
+  logger.log('END', scope, null, params);
   return is_valid;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end email_is_valid;
 
 procedure send_email
@@ -977,6 +1299,8 @@ procedure send_email
   ,p_mail_headers in varchar2  := null             -- json structure of tag/value pairs
   ,p_priority     in number    := default_priority -- lower numbers are processed first
   ) is
+  scope logger_logs.scope%type := scope_prefix || 'send_email';
+  params logger.tab_param;
   enq_opts        dbms_aq.enqueue_options_t;
   enq_msg_props   dbms_aq.message_properties_t;
   payload         t_mailgun_email;
@@ -984,6 +1308,19 @@ procedure send_email
   l_from_name     varchar2(200);
   l_from_email    varchar2(512);
 begin
+  logger.append_param(params,'p_from_name',p_from_name);
+  logger.append_param(params,'p_from_email',p_from_email);
+  logger.append_param(params,'p_reply_to',p_reply_to);
+  logger.append_param(params,'p_to_name',p_to_name);
+  logger.append_param(params,'p_to_email',p_to_email);
+  logger.append_param(params,'p_cc',p_cc);
+  logger.append_param(params,'p_bcc',p_bcc);
+  logger.append_param(params,'p_subject',p_subject);
+  logger.append_param(params,'p_message',dbms_lob.getlength(p_message));
+  logger.append_param(params,'p_tag',p_tag);
+  logger.append_param(params,'p_mail_headers',p_mail_headers);
+  logger.append_param(params,'p_priority',p_priority);
+  logger.log('START', scope, null, params);
 
   if p_to_email is not null then
     assert(rcpt_count = 0, 'cannot mix multiple recipients with p_to_email parameter');
@@ -1041,6 +1378,13 @@ begin
     ,msgid              => msgid
     );
   
+  logger.log('email queued ' || msgid, scope, null, params);
+  
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end send_email;
 
 procedure send_to
@@ -1051,7 +1395,16 @@ procedure send_to
   ,p_id         in varchar2 := null
   ,p_send_by    in varchar2 := 'to'
   ) is
+  scope logger_logs.scope%type := scope_prefix || 'send_to';
+  params logger.tab_param;
 begin
+  logger.append_param(params,'p_email',p_email);
+  logger.append_param(params,'p_name',p_name);
+  logger.append_param(params,'p_first_name',p_first_name);
+  logger.append_param(params,'p_last_name',p_last_name);
+  logger.append_param(params,'p_id',p_id);
+  logger.append_param(params,'p_send_by',p_send_by);
+  logger.log('START', scope, null, params);
 
   add_recipient
     (p_email      => p_email
@@ -1061,6 +1414,11 @@ begin
     ,p_id         => p_id
     ,p_send_by    => p_send_by);
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end send_to;
 
 procedure send_cc
@@ -1070,7 +1428,15 @@ procedure send_cc
   ,p_last_name  in varchar2 := null
   ,p_id         in varchar2 := null
   ) is
+  scope logger_logs.scope%type := scope_prefix || 'send_cc';
+  params logger.tab_param;
 begin
+  logger.append_param(params,'p_email',p_email);
+  logger.append_param(params,'p_name',p_name);
+  logger.append_param(params,'p_first_name',p_first_name);
+  logger.append_param(params,'p_last_name',p_last_name);
+  logger.append_param(params,'p_id',p_id);
+  logger.log('START', scope, null, params);
 
   add_recipient
     (p_email      => p_email
@@ -1080,6 +1446,11 @@ begin
     ,p_id         => p_id
     ,p_send_by    => 'cc');
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end send_cc;
 
 procedure send_bcc
@@ -1089,7 +1460,15 @@ procedure send_bcc
   ,p_last_name  in varchar2 := null
   ,p_id         in varchar2 := null
   ) is
+  scope logger_logs.scope%type := scope_prefix || 'send_bcc';
+  params logger.tab_param;
 begin
+  logger.append_param(params,'p_email',p_email);
+  logger.append_param(params,'p_name',p_name);
+  logger.append_param(params,'p_first_name',p_first_name);
+  logger.append_param(params,'p_last_name',p_last_name);
+  logger.append_param(params,'p_id',p_id);
+  logger.log('START', scope, null, params);
 
   add_recipient
     (p_email      => p_email
@@ -1099,6 +1478,11 @@ begin
     ,p_id         => p_id
     ,p_send_by    => 'bcc');
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end send_bcc;
 
 procedure attach
@@ -1107,7 +1491,14 @@ procedure attach
   ,p_content_type in varchar2
   ,p_inline       in boolean := false
   ) is
+  scope logger_logs.scope%type := scope_prefix || 'attach';
+  params logger.tab_param;
 begin
+  logger.append_param(params,'p_file_content',dbms_lob.getlength(p_file_content));
+  logger.append_param(params,'p_file_name',p_file_name);
+  logger.append_param(params,'p_content_type',p_content_type);
+  logger.append_param(params,'p_inline',p_inline);
+  logger.log('START', scope, null, params);
 
   assert(p_file_content is not null, 'attach(blob): p_file_content cannot be null');
   
@@ -1118,6 +1509,11 @@ begin
     ,p_inline       => p_inline
     );
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end attach;
 
 procedure attach
@@ -1126,7 +1522,14 @@ procedure attach
   ,p_content_type in varchar2
   ,p_inline       in boolean := false
   ) is
+  scope logger_logs.scope%type := scope_prefix || 'attach';
+  params logger.tab_param;
 begin
+  logger.append_param(params,'p_file_content',dbms_lob.getlength(p_file_content));
+  logger.append_param(params,'p_file_name',p_file_name);
+  logger.append_param(params,'p_content_type',p_content_type);
+  logger.append_param(params,'p_inline',p_inline);
+  logger.log('START', scope, null, params);
 
   assert(p_file_content is not null, 'attach(clob): p_file_content cannot be null');
 
@@ -1137,10 +1540,18 @@ begin
     ,p_inline       => p_inline
     );
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end attach;
 
 procedure reset is
+  scope logger_logs.scope%type := scope_prefix || 'reset';
+  params logger.tab_param;
 begin
+  logger.log('START', scope, null, params);
 
   if g_recipient is not null then
     g_recipient.delete;
@@ -1150,13 +1561,23 @@ begin
     g_attachment.delete;
   end if;
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end reset;
 
 procedure create_queue
   (p_max_retries in number := default_max_retries
   ,p_retry_delay in number := default_retry_delay
   ) is
+  scope logger_logs.scope%type := scope_prefix || 'create_queue';
+  params logger.tab_param;
 begin
+  logger.append_param(params,'p_max_retries',p_max_retries);
+  logger.append_param(params,'p_retry_delay',p_retry_delay);
+  logger.log('START', scope, null, params);
 
   dbms_aqadm.create_queue_table
     (queue_table        => queue_table
@@ -1175,10 +1596,18 @@ begin
 
   dbms_aqadm.start_queue (queue_name);
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end create_queue;
 
 procedure drop_queue is
+  scope logger_logs.scope%type := scope_prefix || 'drop_queue';
+  params logger.tab_param;
 begin
+  logger.log('START', scope, null, params);
 
   dbms_aqadm.stop_queue (queue_name);
   
@@ -1186,11 +1615,20 @@ begin
   
   dbms_aqadm.drop_queue_table (queue_table);  
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end drop_queue;
 
 procedure purge_queue (p_msg_state IN VARCHAR2 := default_purge_msg_state) is
+  scope logger_logs.scope%type := scope_prefix || 'purge_queue';
+  params logger.tab_param;
   r_opt dbms_aqadm.aq$_purge_options_t;
 begin
+  logger.append_param(params,'p_msg_state',p_msg_state);
+  logger.log('START', scope, null, params);
 
   dbms_aqadm.purge_queue_table
     (queue_table     => queue_table
@@ -1200,10 +1638,17 @@ begin
                         end
     ,purge_options   => r_opt);
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end purge_queue;
 
 procedure push_queue
   (p_asynchronous in boolean := false) as
+  scope logger_logs.scope%type := scope_prefix || 'push_queue';
+  params logger.tab_param;
   r_dequeue_options    dbms_aq.dequeue_options_t;
   r_message_properties dbms_aq.message_properties_t;
   msgid                raw(16);
@@ -1211,6 +1656,8 @@ procedure push_queue
   dequeue_count        integer := 0;
   job                  binary_integer;
 begin
+  logger.append_param(params,'p_asynchronous',p_asynchronous);
+  logger.log('START', scope, null, params);
 
   if p_asynchronous then
   
@@ -1221,9 +1668,12 @@ begin
       ,what => $$PLSQL_UNIT || '.push_queue;'
       );
       
+    logger.log('submitted job=' || job, scope, null, params);
+      
   else
     
     -- commit any emails requested in the current session
+    logger.log('commit', scope, null, params);
     commit;
     
     r_dequeue_options.wait := dbms_aq.no_wait;
@@ -1240,9 +1690,15 @@ begin
         ,msgid              => msgid
         );
       
+      logger.log('payload priority: ' || r_message_properties.priority
+        || ' enqeued: ' || to_char(r_message_properties.enqueue_time,'dd/mm/yyyy hh24:mi:ss')
+        || ' attempts: ' || r_message_properties.attempts
+        , scope, null, params);
+  
       -- process the message
       send_email (p_payload => payload);  
   
+      logger.log('commit', scope, null, params);
       commit; -- the queue will treat the message as succeeded
       
       -- don't bite off everything in one go
@@ -1252,17 +1708,23 @@ begin
 
   end if;
 
+  logger.log('END', scope, null, params);
 exception
   when e_no_queue_data then
-    null;
+    logger.log('END push_queue finished count=' || dequeue_count, scope, null, params);
   when others then
     rollback; -- the queue will treat the message as failed
+    logger.log_error('Unhandled Exception', scope, null, params);
     raise;
 end push_queue;
 
 procedure create_job
   (p_repeat_interval in varchar2 := default_repeat_interval) is
+  scope logger_logs.scope%type := scope_prefix || 'create_job';
+  params logger.tab_param;
 begin
+  logger.append_param(params,'p_repeat_interval',p_repeat_interval);
+  logger.log('START', scope, null, params);
 
   assert(p_repeat_interval is not null, 'create_job: p_repeat_interval cannot be null');
 
@@ -1278,10 +1740,18 @@ begin
 
   dbms_scheduler.enable(job_name);
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end create_job;
 
 procedure drop_job is
+  scope logger_logs.scope%type := scope_prefix || 'drop_job';
+  params logger.tab_param;
 begin
+  logger.log('START', scope, null, params);
 
   begin
     dbms_scheduler.stop_job (job_name);
@@ -1294,24 +1764,46 @@ begin
   
   dbms_scheduler.drop_job (job_name);
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end drop_job;
 
 procedure purge_logs (p_log_retention_days in number := null) is
+  scope logger_logs.scope%type := scope_prefix || 'purge_logs';
+  params logger.tab_param;
   l_log_retention_days number;
 begin
+  logger.append_param(params,'p_log_retention_days',p_log_retention_days);
+  logger.log('START', scope, null, params);
 
   l_log_retention_days := nvl(p_log_retention_days, log_retention_days);
+  logger.append_param(params,'l_log_retention_days',l_log_retention_days);
   
   delete mailgun_email_log
   where requested_ts < sysdate - l_log_retention_days;
   
+  logger.log_info('DELETED mailgun_email_log: ' || SQL%ROWCOUNT, scope, null, params);
+  
+  logger.log('commit', scope, null, params);
   commit;
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end purge_logs;
 
 procedure create_purge_job
   (p_repeat_interval in varchar2 := default_purge_repeat_interval) is
+  scope logger_logs.scope%type := scope_prefix || 'create_purge_job';
+  params logger.tab_param;
 begin
+  logger.append_param(params,'p_repeat_interval',p_repeat_interval);
+  logger.log('START', scope, null, params);
 
   assert(p_repeat_interval is not null, 'create_purge_job: p_repeat_interval cannot be null');
 
@@ -1327,10 +1819,18 @@ begin
 
   dbms_scheduler.enable(purge_job_name);
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end create_purge_job;
 
 procedure drop_purge_job is
+  scope logger_logs.scope%type := scope_prefix || 'drop_purge_job';
+  params logger.tab_param;
 begin
+  logger.log('START', scope, null, params);
 
   begin
     dbms_scheduler.stop_job (purge_job_name);
@@ -1343,6 +1843,11 @@ begin
   
   dbms_scheduler.drop_job (purge_job_name);
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end drop_purge_job;
 
 -- get mailgun stats
@@ -1353,6 +1858,8 @@ function get_stats
   ,p_end_time        in date     := null
   ,p_duration        in number   := null
   ) return t_mailgun_stat_arr pipelined is
+  scope       logger_logs.scope%type := scope_prefix || 'get_stats';
+  params      logger.tab_param;
   prm         varchar2(4000);
   str         clob;
   stats_count number;
@@ -1371,6 +1878,12 @@ function get_stats
       );
   end get_stat;
 begin
+  logger.append_param(params,'p_event_types',p_event_types);
+  logger.append_param(params,'p_resolution',p_resolution);
+  logger.append_param(params,'p_start_time',p_start_time);
+  logger.append_param(params,'p_end_time',p_end_time);
+  logger.append_param(params,'p_duration',p_duration);
+  logger.log('START', scope, null, params);
 
   assert(p_event_types is not null, 'p_event_types cannot be null');
   assert(p_resolution in ('hour','day','month'), 'p_resolution must be day, month or hour');
@@ -1405,6 +1918,7 @@ begin
   
   if stats_count > 0 then
     for i in 1..stats_count loop
+      logger.log(i||' '||json_members_csv('stats[%d]', i, p_values => true), scope, null, params);
       dt := utc_to_session_tz(apex_json.get_varchar2(p_path=>'stats[%d].time', p0=>i));
       pipe row (get_stat(i,'accepted','incoming'));
       pipe row (get_stat(i,'accepted','outgoing'));
@@ -1426,7 +1940,14 @@ begin
     end loop;
   end if;
 
+  logger.log('END', scope, null, params);
   return;
+exception
+  when no_data_needed then
+    logger.log('END No Data needed', scope, null, params);
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end get_stats;
 
 -- get mailgun stats
@@ -1438,6 +1959,8 @@ function get_tag_stats
   ,p_end_time        in date     := null
   ,p_duration        in number   := null
   ) return t_mailgun_stat_arr pipelined is
+  scope       logger_logs.scope%type := scope_prefix || 'get_tag_stats';
+  params      logger.tab_param;
   prm         varchar2(4000);
   str         clob;
   stats_count number;
@@ -1456,6 +1979,13 @@ function get_tag_stats
       );
   end get_stat;
 begin
+  logger.append_param(params,'p_tag',p_tag);
+  logger.append_param(params,'p_event_types',p_event_types);
+  logger.append_param(params,'p_resolution',p_resolution);
+  logger.append_param(params,'p_start_time',p_start_time);
+  logger.append_param(params,'p_end_time',p_end_time);
+  logger.append_param(params,'p_duration',p_duration);
+  logger.log('START', scope, null, params);
 
   assert(p_tag is not null, 'p_tag cannot be null');
   assert(instr(p_tag,' ') = 0, 'p_tag cannot contain spaces');
@@ -1492,6 +2022,7 @@ begin
   
   if stats_count > 0 then
     for i in 1..stats_count loop
+      logger.log(i||' '||json_members_csv('stats[%d]', i, p_values => true), scope, null, params);
       dt := utc_to_session_tz(apex_json.get_varchar2(p_path=>'stats[%d].time', p0=>i));
       pipe row (get_stat(i,'accepted','incoming'));
       pipe row (get_stat(i,'accepted','outgoing'));
@@ -1513,7 +2044,14 @@ begin
     end loop;
   end if;
 
+  logger.log('END', scope, null, params);
   return;
+exception
+  when no_data_needed then
+    logger.log('END No Data needed', scope, null, params);
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end get_tag_stats;
 
 function get_events
@@ -1527,11 +2065,23 @@ function get_events
   ,p_tags            in varchar2 := null
   ,p_severity        in varchar2 := null
   ) return t_mailgun_event_arr pipelined is
+  scope       logger_logs.scope%type := scope_prefix || 'get_events';
+  params      logger.tab_param;
   prm         varchar2(4000);
   str         clob;
   event_count number;
   url         varchar2(4000);
 begin
+  logger.append_param(params,'p_start_time',p_start_time);
+  logger.append_param(params,'p_end_time',p_end_time);
+  logger.append_param(params,'p_page_size',p_page_size);
+  logger.append_param(params,'p_event',p_event);
+  logger.append_param(params,'p_sender',p_sender);
+  logger.append_param(params,'p_recipient',p_recipient);
+  logger.append_param(params,'p_subject',p_subject);
+  logger.append_param(params,'p_tags',p_tags);
+  logger.append_param(params,'p_severity',p_severity);
+  logger.log('START', scope, null, params);
   
   assert(p_page_size <= 300, 'p_page_size cannot be greater than 300 (' || p_page_size || ')');
   assert(p_severity in ('temporary','permanent'), 'p_severity must be "temporary" or "permanent"');
@@ -1564,6 +2114,7 @@ begin
     exit when event_count = 0;
     
     for i in 1..event_count loop
+      logger.log(i||' '||json_members_csv('items[%d]', i, p_values => true), scope, null, params);
       pipe row (t_mailgun_event
         ( event                => substr(apex_json.get_varchar2('items[%d].event', i), 1, 100)
         , event_ts             => epoch_to_dt(apex_json.get_number('items[%d].timestamp', i))
@@ -1601,22 +2152,35 @@ begin
     -- get next page of results
     prm := null;
     url := apex_json.get_varchar2('paging.next');    
+    logger.log('next url=' || url, scope, null, params);
     -- convert url to use reverse-apache version, if necessary
     url := replace(url, default_api_url, api_url);
+    logger.log('next url[converted]=' || url, scope, null, params);
     exit when url is null;
   end loop;
     
+  logger.log('END', scope, null, params);
   return;
+exception
+  when no_data_needed then
+    logger.log('END No Data Needed', scope, null, params);
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end get_events;
 
 function get_tags
   (p_limit in number := null -- max rows to fetch (default 100)
   ) return t_mailgun_tag_arr pipelined is
+  scope      logger_logs.scope%type := scope_prefix || 'get_tags';
+  params     logger.tab_param;
   prm        varchar2(4000);
   str        clob;
   item_count number;
 
 begin
+  logger.append_param(params,'p_limit',p_limit);
+  logger.log('START', scope, null, params);
 
   url_param(prm, 'limit', p_limit);
   
@@ -1632,6 +2196,7 @@ begin
   
   if item_count > 0 then  
     for i in 1..item_count loop
+      logger.log(i||' '||json_members_csv('items[%d]', i, p_values => true), scope, null, params);
       pipe row (t_mailgun_tag
         ( tag_name    => substr(apex_json.get_varchar2('items[%d].tag', i), 1, 4000)
         , description => substr(apex_json.get_varchar2('items[%d].description', i), 1, 4000)
@@ -1639,16 +2204,28 @@ begin
     end loop;
   end if;
     
+  logger.log('END', scope, null, params);
   return;
+exception
+  when no_data_needed then
+    logger.log('END No Data Needed', scope, null, params);
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end get_tags;
 
 procedure update_tag
   (p_tag         in varchar2
   ,p_description in varchar2 := null) is
+  scope logger_logs.scope%type := scope_prefix || 'update_tag';
+  params logger.tab_param;
   prm  varchar2(4000);
   str  clob;
 
 begin
+  logger.append_param(params,'p_tag',p_tag);
+  logger.append_param(params,'p_description',p_description);
+  logger.log('START', scope, null, params);
 
   assert(p_tag is not null, 'p_tag cannot be null');
   assert(instr(p_tag,' ') = 0, 'p_tag cannot contain spaces');
@@ -1664,13 +2241,22 @@ begin
   
   -- normally it returns {"message":"Tag updated"}
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end update_tag;
 
 procedure delete_tag (p_tag in varchar2) is
+  scope logger_logs.scope%type := scope_prefix || 'delete_tag';
+  params logger.tab_param;
   prm  varchar2(4000);
   str  clob;
 
 begin
+  logger.append_param(params,'p_tag',p_tag);
+  logger.log('START', scope, null, params);
 
   assert(p_tag is not null, 'p_tag cannot be null');
   assert(instr(p_tag,' ') = 0, 'p_tag cannot contain spaces');
@@ -1683,17 +2269,27 @@ begin
   
   -- normally it returns {"message":"Tag deleted"}
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end delete_tag;
 
 function get_suppressions
   (p_type  in varchar2 -- 'bounces', 'unsubscribes', or 'complaints'
   ,p_limit in number := null -- max rows to fetch (default 100)
   ) return t_mailgun_suppression_arr pipelined is
+  scope      logger_logs.scope%type := scope_prefix || 'get_suppressions';
+  params     logger.tab_param;
   prm        varchar2(4000);
   str        clob;
   item_count number;
 
 begin
+  logger.append_param(params,'p_type',p_type);
+  logger.append_param(params,'p_limit',p_limit);
+  logger.log('START', scope, null, params);
   
   assert(p_type is not null, 'p_type cannot be null');
   assert(p_type in ('bounces','unsubscribes','complaints'), 'p_type must be bounces, unsubscribes, or complaints');
@@ -1712,6 +2308,7 @@ begin
 
   if item_count > 0 then
     for i in 1..item_count loop
+      logger.log(i||' '||json_members_csv('items[%d]', i, p_values => true), scope, null, params);
       pipe row (t_mailgun_suppression
         ( suppression_type => substr(p_type, 1, length(p_type)-1)
         , email_address    => substr(apex_json.get_varchar2('items[%d].address', i), 1, 4000)
@@ -1723,13 +2320,24 @@ begin
     end loop;
   end if;
     
+  logger.log('END', scope, null, params);
   return;
+exception
+  when no_data_needed then
+    logger.log('END No Data Needed', scope, null, params);
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end get_suppressions;
 
 -- remove an email address from the bounce list
 procedure delete_bounce (p_email_address in varchar2) is
+  scope logger_logs.scope%type := scope_prefix || 'delete_bounce';
+  params logger.tab_param;
   str  clob;
 begin
+  logger.append_param(params,'p_email_address',p_email_address);
+  logger.log('START', scope, null, params);
   
   assert(p_email_address is not null, 'p_email_address cannot be null');
 
@@ -1741,6 +2349,11 @@ begin
 
   -- normally it returns {"address":"...the address...","message":"Bounced address has been removed"}
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end delete_bounce;
 
 -- add an email address to the unsubscribe list
@@ -1748,9 +2361,14 @@ procedure add_unsubscribe
   (p_email_address in varchar2
   ,p_tag           in varchar2 := null
   ) is
+  scope logger_logs.scope%type := scope_prefix || 'add_unsubscribe';
+  params logger.tab_param;
   prm  varchar2(4000);
   str  clob;
 begin
+  logger.append_param(params,'p_email_address',p_email_address);
+  logger.append_param(params,'p_tag',p_tag);
+  logger.log('START', scope, null, params);
   
   assert(p_email_address is not null, 'p_email_address cannot be null');
 
@@ -1764,6 +2382,11 @@ begin
     ,p_pwd    => setting(setting_private_api_key)
     ,p_method => 'POST');
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end add_unsubscribe;
 
 -- remove an email address from the unsubscribe list
@@ -1771,9 +2394,14 @@ procedure delete_unsubscribe
   (p_email_address in varchar2
   ,p_tag           in varchar2 := null
   ) is
+  scope logger_logs.scope%type := scope_prefix || 'delete_unsubscribe';
+  params logger.tab_param;
   prm  varchar2(4000);
   str  clob;
 begin
+  logger.append_param(params,'p_email_address',p_email_address);
+  logger.append_param(params,'p_tag',p_tag);
+  logger.log('START', scope, null, params);
   
   assert(p_email_address is not null, 'p_email_address cannot be null');
 
@@ -1788,12 +2416,21 @@ begin
 
   -- normally it returns {"message":"Unsubscribe event has been removed"}
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end delete_unsubscribe;
 
 -- remove an email address from the complaint list
 procedure delete_complaint (p_email_address in varchar2) is
+  scope logger_logs.scope%type := scope_prefix || 'delete_complaint';
+  params logger.tab_param;
   str  clob;
 begin
+  logger.append_param(params,'p_email_address',p_email_address);
+  logger.log('START', scope, null, params);
   
   assert(p_email_address is not null, 'p_email_address cannot be null');
 
@@ -1805,7 +2442,37 @@ begin
 
   -- normally it returns {"message":"Spam complaint has been removed"}
 
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
 end delete_complaint;
+
+procedure send_test_email is
+  scope logger_logs.scope%type := scope_prefix || 'send_test_email';
+  params logger.tab_param;
+begin
+  logger.log('START', scope, null, params);
+
+  send_email
+    (p_from_email => 'Mr Sender <sender@jk64.com>'
+    ,p_to_email   => 'Ms Recipient <recipient@jk64.com>'
+    ,p_subject    => 'test subject ' || to_char(systimestamp,'DD/MM/YYYY HH24:MI:SS.FF')
+    ,p_message    => 'Test Email Body'
+    );
+  
+  push_queue;
+
+  logger.log('commit', scope, null, params);
+  commit;
+
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
+end send_test_email;
 
 end mailgun_pkg;
 /
