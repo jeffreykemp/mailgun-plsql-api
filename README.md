@@ -11,9 +11,9 @@ The API provides methods to:
   * **send an email**
     > *NOTE: another alternative (one that also works with Oracle Apex's builtin email system) is to use the mailgun SMTP interface instead.*
 
-  * query your mailgun usage and failure **statistics**
+  * query your mailgun usage and failure **statistics** and events log
 
-  * *(more planned)*
+  * manage your mailgun **bounces, unsubscribes and complaints** lists
 
 For installation instructions, detailed API references and example code, refer to the **[WIKI](https://github.com/jeffreykemp/mailgun-plsql-api/wiki)**.
 
