@@ -3,6 +3,7 @@ undef myschema
 
 accept myschema prompt 'Enter the schema in which you will install mailgun:'
 
+grant create table to &&myschema;
 grant create job to &&myschema;
 grant create procedure to &&myschema;
 grant create type to &&myschema;
