@@ -11,7 +11,6 @@ grant create type to &&myschema;
 grant execute on sys.dbms_aq to &&myschema;
 grant execute on sys.dbms_aqadm to &&myschema;
 grant execute on sys.dbms_job to &&myschema;
-grant execute on sys.dbms_output to &&myschema;
 grant execute on sys.dbms_scheduler to &&myschema;
 grant execute on sys.dbms_utility to &&myschema;
 grant execute on sys.utl_http to &&myschema;

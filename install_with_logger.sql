@@ -11,8 +11,11 @@ prompt create queue
 begin mailgun_pkg.create_queue; end;
 /
 
-prompt create scheduler job
+prompt create scheduler jobs
 begin mailgun_pkg.create_job; end;
+/
+
+begin mailgun_pkg.create_purge_job; end;
 /
 
 prompt attempt to recompile any invalid objects
