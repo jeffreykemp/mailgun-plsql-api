@@ -779,12 +779,17 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
     log.mail_headers    := SUBSTR(p_payload.mail_headers, 1, 4000);
     log.recipients      := SUBSTR(recipients_to, 1, 4000);
 
-    apex_json.parse( resp_text );
-    log.mailgun_id      := apex_json.get_varchar2('id');
-    log.mailgun_message := apex_json.get_varchar2('message');
-    
-    logger.log('response: ' || log.mailgun_message, scope, null, params);
-    logger.log('msg id: ' || log.mailgun_id, scope, null, params);
+    begin
+      apex_json.parse( resp_text );
+      log.mailgun_id      := apex_json.get_varchar2('id');
+      log.mailgun_message := apex_json.get_varchar2('message');
+      
+      logger.log('response: ' || log.mailgun_message, scope, null, params);
+      logger.log('msg id: ' || log.mailgun_id, scope, null, params);
+    exception
+      when others then
+        logger.log_error('error parsing response: ' || SQLERRM, scope, resp_text, params);
+    end;
 
     insert into mailgun_email_log values log;
     logger.log('inserted mailgun_email_log: ' || sql%rowcount, scope, null, params);
