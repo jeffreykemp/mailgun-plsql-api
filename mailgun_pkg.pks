@@ -1,5 +1,6 @@
 create or replace package mailgun_pkg is
-/* mailgun API v0.6
+/* mailgun API v0.7
+  https://github.com/jeffreykemp/mailgun-plsql-api
   by Jeffrey Kemp
 */
 
@@ -39,6 +40,8 @@ crlf                          constant varchar2(2) := chr(13) || chr(10);
 
 -- init: set up mailgun parameters
 --   default is to not change the given parameter
+--   for details refer to:
+--https://github.com/jeffreykemp/mailgun-plsql-api/wiki/API-Reference#procedure-init
 procedure init
   (p_public_api_key       in varchar2 := default_no_change
   ,p_private_api_key      in varchar2 := default_no_change
@@ -50,6 +53,8 @@ procedure init
   ,p_default_sender_name  in varchar2 := default_no_change
   ,p_default_sender_email in varchar2 := default_no_change
   ,p_queue_expiration     in number := null
+  ,p_prod_instance_name   in varchar2 := default_no_change
+  ,p_non_prod_recipient   in varchar2 := default_no_change
   );
 
 -- validate_email: validate an email address (procedure version)
@@ -71,6 +76,8 @@ function email_is_valid (p_address in varchar2) return boolean;
 -- send an email
 -- (to add more recipients or attach files to the email, call the relevant send_xx()
 -- or attach() procedures before calling this)
+-- for details refer to:
+--https://github.com/jeffreykemp/mailgun-plsql-api/wiki/API-Reference#procedure-send_email
 procedure send_email
   (p_from_name    in varchar2  := null
   ,p_from_email   in varchar2  := null
@@ -238,6 +245,23 @@ procedure delete_unsubscribe
 
 -- remove an email address from the complaint list
 procedure delete_complaint (p_email_address in varchar2);
+
+-- Send a test email.
+-- Settings can be overridden just for this call (i.e. they won't be saved)
+-- e.g. to test whether new settings will work.
+procedure send_test_email
+  (p_from_name       in varchar2 := null
+  ,p_from_email      in varchar2 := null
+  ,p_to_name         in varchar2 := null
+  ,p_to_email        in varchar2
+  ,p_subject         in varchar2 := null -- if null, a subject will be generated
+  ,p_message         in varchar2 := null -- if null, a message will be generated
+  ,p_private_api_key in varchar2 := default_no_change
+  ,p_my_domain       in varchar2 := default_no_change
+  ,p_api_url         in varchar2 := default_no_change
+  ,p_wallet_path     in varchar2 := default_no_change
+  ,p_wallet_password in varchar2 := default_no_change
+  );
 
 end mailgun_pkg;
 /
