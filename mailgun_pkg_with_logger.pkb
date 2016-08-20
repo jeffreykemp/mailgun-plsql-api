@@ -153,16 +153,11 @@ begin
   p_value := g_setting(p_name);
 
   logger.log('END', scope, null, params);
-  return nvl(p_value, p_default);
+  return p_value;
 exception
   when no_data_found then
-    if p_default is not null then
-      logger.log('END default', scope, null, params);
-      return p_default;
-    else
-      logger.log_error('No Data Found', scope, null, params);
-      raise_application_error(-20000, 'mailgun setting not set "' || p_name || '" - please setup using ' || $$plsql_unit || '.init()');
-    end if;
+    logger.log_error('No Data Found', scope, null, params);
+    raise_application_error(-20000, 'mailgun setting not set "' || p_name || '" - please setup using ' || $$plsql_unit || '.init()');
   when others then
     logger.log_error('Unhandled Exception', scope, null, params);
     raise;
@@ -180,7 +175,7 @@ function get_global_name return varchar2 result_cache is
 begin
   logger.log('START', scope, null, params);
 
-  select g.global_name into gn from global_name g;
+  select g.global_name into gn from sys.global_name g;
 
   logger.log('END gn=' || gn, scope, null, params);
   return gn;
