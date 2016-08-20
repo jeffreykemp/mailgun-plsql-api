@@ -98,7 +98,6 @@ exception
 end set_setting;
 
 -- retrieve all the settings for a normal session
--- We're not using 
 procedure load_settings is
   scope logger_logs.scope%type := scope_prefix || 'load_settings';
   params logger.tab_param;
@@ -136,10 +135,7 @@ end load_settings;
 -- get a setting
 -- if p_default is set, a null/not found will return the default value
 -- if p_default is null, a not found will raise an exception
-function setting
-  (p_name      in varchar2
-  ,p_default   in varchar2 := null
-  ) return varchar2 is
+function setting (p_name in varchar2) return varchar2 is
   scope logger_logs.scope%type := scope_prefix || 'setting';
   params logger.tab_param;
   p_value mailgun_settings.setting_value%type;
