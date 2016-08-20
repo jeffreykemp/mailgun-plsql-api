@@ -1,7 +1,8 @@
 create or replace package body mailgun_pkg is
-/* mailgun API v0.6
-  Instrumented using Logger https://github.com/OraOpenSource/Logger
+/* mailgun API v0.7
+  https://github.com/jeffreykemp/mailgun-plsql-api
   by Jeffrey Kemp
+  Instrumented using Logger https://github.com/OraOpenSource/Logger
 */
 
 scope_prefix constant varchar2(31) := lower($$plsql_unit) || '.';
@@ -11,7 +12,7 @@ default_api_url            constant varchar2(4000) := 'https://api.mailgun.net/v
 default_log_retention_days constant number := 30;
 default_queue_expiration   constant integer := 24 * 60 * 60; -- failed emails expire from the queue after 24 hours
 
-boundary               constant varchar2(100) := '-----zdkgyl5aalom86symjq9y81s2jtorr';
+boundary               constant varchar2(100) := '-----lgryztl0v2vk7fw3njd6cutmxtwysb';
 max_recipients         constant integer := 1000; -- mailgun limitation for recipient variables
 queue_name             constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue';
 queue_table            constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue_tab';
@@ -31,9 +32,14 @@ setting_log_retention_days     constant varchar2(100) := 'log_retention_days';
 setting_default_sender_name    constant varchar2(100) := 'default_sender_name';
 setting_default_sender_email   constant varchar2(100) := 'default_sender_email';
 setting_queue_expiration       constant varchar2(100) := 'queue_expiration';
+setting_prod_instance_name     constant varchar2(100) := 'prod_instance_name';
+setting_non_prod_recipient     constant varchar2(100) := 'non_prod_recipient';
+
+type t_key_val_arr is table of varchar2(4000) index by varchar2(100);
 
 g_recipient       t_mailgun_recipient_arr;
 g_attachment      t_mailgun_attachment_arr;
+g_setting         t_key_val_arr;
 
 e_no_queue_data exception;
 pragma exception_init (e_no_queue_data, -25228);
@@ -80,6 +86,9 @@ begin
   
   logger.log('commit', scope, null, params);
   commit;
+  
+  -- cause the settings to be reloaded in this session
+  reset;
 
   logger.log('END', scope, null, params);
 exception
@@ -88,13 +97,49 @@ exception
     raise;
 end set_setting;
 
+-- retrieve all the settings for a normal session
+-- We're not using 
+procedure load_settings is
+  scope logger_logs.scope%type := scope_prefix || 'load_settings';
+  params logger.tab_param;
+begin
+  logger.log('START', scope, null, params);
+  
+  -- set defaults first
+  g_setting(setting_api_url)              := default_api_url;
+  g_setting(setting_wallet_path)          := '';
+  g_setting(setting_wallet_password)      := '';
+  g_setting(setting_log_retention_days)   := default_log_retention_days;
+  g_setting(setting_default_sender_name)  := '';
+  g_setting(setting_default_sender_email) := '';
+  g_setting(setting_queue_expiration)     := default_queue_expiration;
+  g_setting(setting_prod_instance_name)   := '';
+  g_setting(setting_non_prod_recipient)   := '';
+
+  for r in (
+    select s.setting_name
+          ,s.setting_value
+    from   mailgun_settings s
+    ) loop
+    
+    g_setting(r.setting_name) := r.setting_value;
+    
+  end loop;
+
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
+end load_settings;
+
 -- get a setting
 -- if p_default is set, a null/not found will return the default value
 -- if p_default is null, a not found will raise an exception
 function setting
-  (p_name    in varchar2
-  ,p_default in varchar2 := null
-  ) return varchar2 result_cache is
+  (p_name      in varchar2
+  ,p_default   in varchar2 := null
+  ) return varchar2 is
   scope logger_logs.scope%type := scope_prefix || 'setting';
   params logger.tab_param;
   p_value mailgun_settings.setting_value%type;
@@ -104,16 +149,19 @@ begin
 
   assert(p_name is not null, 'p_name cannot be null');
   
-  select s.setting_value
-  into   p_value
-  from   mailgun_settings s
-  where  s.setting_name = setting.p_name;
+  -- prime the settings array for this session
+  if g_setting.count = 0 then
+    load_settings;
+  end if;
+  
+  p_value := g_setting(p_name);
 
   logger.log('END', scope, null, params);
   return nvl(p_value, p_default);
 exception
   when no_data_found then
     if p_default is not null then
+      logger.log('END default', scope, null, params);
       return p_default;
     else
       logger.log_error('No Data Found', scope, null, params);
@@ -124,15 +172,56 @@ exception
     raise;
 end setting;
 
-function api_url return varchar2 is
-begin
-  return setting(setting_api_url, p_default => default_api_url);
-end api_url;
-
 function log_retention_days return number is
 begin
-  return to_number(setting(setting_log_retention_days, p_default => default_log_retention_days));
+  return to_number(setting(setting_log_retention_days));
 end log_retention_days;
+
+function get_global_name return varchar2 result_cache is
+  scope  logger_logs.scope%type := scope_prefix || 'get_global_name';
+  params logger.tab_param;
+  gn global_name.global_name%type;
+begin
+  logger.log('START', scope, null, params);
+
+  select g.global_name into gn from global_name g;
+
+  logger.log('END gn=' || gn, scope, null, params);
+  return gn;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
+end get_global_name;
+
+procedure prod_check
+  (p_is_prod            out boolean
+  ,p_non_prod_recipient out varchar2
+  ) is
+  scope  logger_logs.scope%type := scope_prefix || 'prod_check';
+  params logger.tab_param;
+  prod_instance_name mailgun_settings.setting_value%type;
+begin
+  logger.log('START', scope, null, params);
+  
+  prod_instance_name := setting(setting_prod_instance_name);
+  
+  if prod_instance_name is not null then  
+    p_is_prod := prod_instance_name = get_global_name;
+  else
+    p_is_prod := true; -- if setting not set, we treat this as a prod env
+  end if;
+  
+  if not p_is_prod then
+    p_non_prod_recipient := setting(setting_non_prod_recipient);
+  end if;
+
+  logger.log('END', scope, null, params);
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
+end prod_check;
 
 function enc_chars (m in varchar2) return varchar2 is
 begin
@@ -152,26 +241,26 @@ function enc_chars (clob_content in clob) return clob is
   counter      pls_integer         := 1;
   out_clob     clob;
 begin
-  logger.append_param(params,'clob_content.len',dbms_lob.getlength(clob_content));
+  logger.append_param(params,'clob_content.len',sys.dbms_lob.getlength(clob_content));
   logger.log('START', scope, null, params);
 
   assert(clob_content is not null, 'enc_chars: clob_content cannot be null');
-  dbms_lob.createtemporary(out_clob, false, dbms_lob.call);
-  file_len := dbms_lob.getlength (clob_content);
+  sys.dbms_lob.createtemporary(out_clob, false, sys.dbms_lob.call);
+  file_len := sys.dbms_lob.getlength (clob_content);
   logger.log('enc_chars ' || file_len || ' bytes', scope, null, params);
   modulo := mod (file_len, amt);
   pieces := trunc (file_len / amt);  
   while (counter <= pieces) loop
-    dbms_lob.read (clob_content, amt, filepos, buf);
+    sys.dbms_lob.read (clob_content, amt, filepos, buf);
     buf := enc_chars(buf);
-    dbms_lob.writeappend(out_clob, length(buf), buf);
+    sys.dbms_lob.writeappend(out_clob, length(buf), buf);
     filepos := counter * amt + 1;
     counter := counter + 1;
   end loop;  
   if (modulo <> 0) then
-    dbms_lob.read (clob_content, modulo, filepos, buf);
+    sys.dbms_lob.read (clob_content, modulo, filepos, buf);
     buf := enc_chars(buf);
-    dbms_lob.writeappend(out_clob, length(buf), buf);
+    sys.dbms_lob.writeappend(out_clob, length(buf), buf);
   end if;
 
   logger.log('END', scope, null, params);
@@ -190,13 +279,13 @@ function clob_size_bytes (clob_content in clob) return integer is
   chunks     integer;
   chunk_size constant integer := 2000;
 begin
-  logger.append_param(params,'clob_content.len',dbms_lob.getlength(clob_content));
+  logger.append_param(params,'clob_content.len',sys.dbms_lob.getlength(clob_content));
   logger.log('START', scope, null, params);
   
-  chunks := ceil(dbms_lob.getlength(clob_content) / chunk_size);
+  chunks := ceil(sys.dbms_lob.getlength(clob_content) / chunk_size);
   
   for i in 1..chunks loop
-    ret := ret + lengthb(dbms_lob.substr(clob_content, amount => chunk_size, offset => (i-1)*chunk_size+1));
+    ret := ret + lengthb(sys.dbms_lob.substr(clob_content, amount => chunk_size, offset => (i-1)*chunk_size+1));
   end loop;
 
   logger.log('END ret=' || ret, scope, null, params);
@@ -233,7 +322,7 @@ exception
     raise;
 end val_email_min;
 
-procedure log_headers (resp in out nocopy utl_http.resp) is
+procedure log_headers (resp in out nocopy sys.utl_http.resp) is
   scope logger_logs.scope%type := scope_prefix || 'log_headers';
   params logger.tab_param;
   name  varchar2(256);
@@ -241,8 +330,8 @@ procedure log_headers (resp in out nocopy utl_http.resp) is
 begin
   logger.log('START', scope, null, params);
 
-  for i in 1..utl_http.get_header_count(resp) loop
-    utl_http.get_header(resp, i, name, value);
+  for i in 1..sys.utl_http.get_header_count(resp) loop
+    sys.utl_http.get_header(resp, i, name, value);
     logger.log(name || ': ' || value, scope, null, params);
   end loop;
 
@@ -258,15 +347,14 @@ procedure set_wallet is
   params logger.tab_param;
   wallet_path     varchar2(4000);
   wallet_password varchar2(4000);
-  default_null    constant varchar2(100) := '*NULL*';
 begin
   logger.log('START', scope, null, params);
   
-  wallet_path := setting(setting_wallet_path, p_default => default_null);
-  wallet_password := setting(setting_wallet_password, p_default => default_null);
+  wallet_path := setting(setting_wallet_path);
+  wallet_password := setting(setting_wallet_password);
 
-  if wallet_path != default_null or wallet_password != default_null then
-    utl_http.set_wallet(wallet_path, wallet_password);
+  if wallet_path is not null or wallet_password is not null then
+    sys.utl_http.set_wallet(wallet_path, wallet_password);
   end if;
 
   logger.log('END', scope, null, params);
@@ -276,7 +364,7 @@ exception
     raise;
 end set_wallet;
 
-function get_response (resp in out nocopy utl_http.resp) return clob is
+function get_response (resp in out nocopy sys.utl_http.resp) return clob is
   scope logger_logs.scope%type := scope_prefix || 'get_response';
   params logger.tab_param;
   buf varchar2(32767);
@@ -284,18 +372,18 @@ function get_response (resp in out nocopy utl_http.resp) return clob is
 begin
   logger.log('START', scope, null, params);
   
-  dbms_lob.createtemporary(ret, true);
+  sys.dbms_lob.createtemporary(ret, true);
 
   begin
     loop
-      utl_http.read_text(resp, buf, 32767);
-      dbms_lob.writeappend(ret, length(buf), buf);
+      sys.utl_http.read_text(resp, buf, 32767);
+      sys.dbms_lob.writeappend(ret, length(buf), buf);
     end loop;
   exception
-    when utl_http.end_of_body then
+    when sys.utl_http.end_of_body then
       null;
   end;
-  utl_http.end_response(resp);
+  sys.utl_http.end_response(resp);
 
   logger.log('END', scope, ret, params);
   return ret;
@@ -315,8 +403,8 @@ function get_json
   scope logger_logs.scope%type := scope_prefix || 'get_json';
   params logger.tab_param;
   url   varchar2(4000) := p_url;
-  req   utl_http.req;
-  resp  utl_http.resp;
+  req   sys.utl_http.req;
+  resp  sys.utl_http.resp;
   ret   clob;
 begin
   logger.append_param(params,'p_url',p_url);
@@ -335,15 +423,15 @@ begin
   
   set_wallet;
 
-  req := utl_http.begin_request(url => url, method => p_method);
+  req := sys.utl_http.begin_request(url => url, method => p_method);
 
   if p_user is not null or p_pwd is not null then
-    utl_http.set_authentication(req, p_user, p_pwd);
+    sys.utl_http.set_authentication(req, p_user, p_pwd);
   end if;
 
-  utl_http.set_header (req,'Accept','application/json');
+  sys.utl_http.set_header (req,'Accept','application/json');
 
-  resp := utl_http.get_response(req);
+  resp := sys.utl_http.get_response(req);
   logger.log('HTTP response: ' || resp.status_code || ' ' || resp.reason_phrase, scope, null, params);
 
   log_headers(resp);
@@ -504,8 +592,8 @@ procedure add_attachment
   params logger.tab_param;
 begin
   logger.append_param(params,'p_file_name',p_file_name);
-  logger.append_param(params,'p_blob_content',dbms_lob.getlength(p_blob_content));
-  logger.append_param(params,'p_clob_content',dbms_lob.getlength(p_clob_content));
+  logger.append_param(params,'p_blob_content',sys.dbms_lob.getlength(p_blob_content));
+  logger.append_param(params,'p_clob_content',sys.dbms_lob.getlength(p_clob_content));
   logger.append_param(params,'p_content_type',p_content_type);
   logger.append_param(params,'p_inline',p_inline);
   logger.log('START', scope, null, params);
@@ -617,7 +705,7 @@ exception
 end render_mail_headers;
 
 procedure write_text
-  (req in out nocopy utl_http.req
+  (req in out nocopy sys.utl_http.req
   ,buf in varchar2) is
   scope logger_logs.scope%type := scope_prefix || 'write_text';
   params logger.tab_param;
@@ -625,7 +713,7 @@ begin
   logger.append_param(params,'buf',length(buf));
   logger.log('START', scope, null, params);
 
-  utl_http.write_text(req, buf);
+  sys.utl_http.write_text(req, buf);
 
   logger.log('END', scope, null, params);
 exception
@@ -635,7 +723,7 @@ exception
 end write_text;
 
 procedure write_clob
-  (req          in out nocopy utl_http.req
+  (req          in out nocopy sys.utl_http.req
   ,file_content in clob) is
   scope logger_logs.scope%type := scope_prefix || 'write_clob';
   params logger.tab_param;
@@ -648,22 +736,22 @@ procedure write_clob
   filepos      pls_integer         := 1;
   counter      pls_integer         := 1;
 begin
-  logger.append_param(params,'file_content',dbms_lob.getlength(file_content));
+  logger.append_param(params,'file_content',sys.dbms_lob.getlength(file_content));
   logger.log('START', scope, null, params);
 
   assert(file_content is not null, 'write_clob: file_content cannot be null');
-  file_len := dbms_lob.getlength (file_content);
+  file_len := sys.dbms_lob.getlength (file_content);
   logger.log('write_clob ' || file_len || ' chars', scope, null, params);
   modulo := mod (file_len, amt);
   pieces := trunc (file_len / amt);  
   while (counter <= pieces) loop
-    dbms_lob.read (file_content, amt, filepos, buf);
+    sys.dbms_lob.read (file_content, amt, filepos, buf);
     write_text(req, buf);
     filepos := counter * amt + 1;
     counter := counter + 1;
   end loop;  
   if (modulo <> 0) then
-    dbms_lob.read (file_content, modulo, filepos, buf);
+    sys.dbms_lob.read (file_content, modulo, filepos, buf);
     write_text(req, buf);
   end if;
 
@@ -675,7 +763,7 @@ exception
 end write_clob;
 
 procedure write_blob
-  (req          in out nocopy utl_http.req
+  (req          in out nocopy sys.utl_http.req
   ,file_content in out nocopy blob) is
   scope logger_logs.scope%type := scope_prefix || 'write_blob';
   params logger.tab_param;
@@ -688,23 +776,23 @@ procedure write_blob
   filepos      pls_integer         := 1;
   counter      pls_integer         := 1;
 begin
-  logger.append_param(params,'file_content',dbms_lob.getlength(file_content));
+  logger.append_param(params,'file_content',sys.dbms_lob.getlength(file_content));
   logger.log('START', scope, null, params);
 
   assert(file_content is not null, 'write_blob: file_content cannot be null');
-  file_len := dbms_lob.getlength (file_content);
+  file_len := sys.dbms_lob.getlength (file_content);
   logger.log('write_blob ' || file_len || ' bytes', scope, null, params);
   modulo := mod (file_len, amt);
   pieces := trunc (file_len / amt);  
   while (counter <= pieces) loop
-    dbms_lob.read (file_content, amt, filepos, buf);
-    utl_http.write_raw(req, buf);
+    sys.dbms_lob.read (file_content, amt, filepos, buf);
+    sys.utl_http.write_raw(req, buf);
     filepos := counter * amt + 1;
     counter := counter + 1;
   end loop;  
   if (modulo <> 0) then
-    dbms_lob.read (file_content, modulo, filepos, buf);
-    utl_http.write_raw(req, buf);
+    sys.dbms_lob.read (file_content, modulo, filepos, buf);
+    sys.utl_http.write_raw(req, buf);
   end if;
 
   logger.log('END', scope, null, params);
@@ -717,22 +805,21 @@ end write_blob;
 procedure send_email (p_payload in out nocopy t_mailgun_email) is
   scope logger_logs.scope%type := scope_prefix || 'send_email';
   params logger.tab_param;
-  url              varchar2(32767) := api_url || setting(setting_my_domain) || '/messages';
-  header           clob;
-  sender           varchar2(4000);
-  recipients_to    varchar2(32767);
-  recipients_cc    varchar2(32767);
-  recipients_bcc   varchar2(32767);
-  footer           varchar2(100);
-  req              utl_http.req;
-  resp             utl_http.resp;
-  my_scheme        varchar2(256);
-  my_realm         varchar2(256);
-  attachment_size  integer;
-  resp_text        varchar2(32767);
-  recipient_count  integer := 0;
-  attachment_count integer := 0;
-  log              mailgun_email_log%rowtype;
+  url varchar2(32767) := setting(setting_api_url) || setting(setting_my_domain) || '/messages';
+  header               clob;
+  sender               varchar2(4000);
+  recipients_to        varchar2(32767);
+  recipients_cc        varchar2(32767);
+  recipients_bcc       varchar2(32767);
+  footer               varchar2(100);
+  attachment_size      integer;
+  resp_text            varchar2(32767);
+  recipient_count      integer := 0;
+  attachment_count     integer := 0;
+  subject              varchar2(4000);
+  is_prod              boolean;
+  non_prod_recipient   varchar2(255);
+  log                  mailgun_email_log%rowtype;
 
   procedure append_recipient (rcpt_list in out varchar2, r in t_mailgun_recipient) is
   begin    
@@ -755,8 +842,88 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
   
   procedure append_header (buf in varchar2) is
   begin
-    dbms_lob.writeappend(header, length(buf), buf);
+    sys.dbms_lob.writeappend(header, length(buf), buf);
   end append_header;
+  
+  procedure mailgun_post is
+    req       sys.utl_http.req;
+    resp      sys.utl_http.resp;
+  begin
+    logger.log('mailgun_post', scope, null, params);
+
+    -- Turn off checking of status code. We will check it by ourselves.
+    sys.utl_http.set_response_error_check(false);
+  
+    set_wallet;
+    
+    req := sys.utl_http.begin_request(url, 'POST');
+    
+    sys.utl_http.set_authentication(req, 'api', setting(setting_private_api_key)); -- Use HTTP Basic Authen. Scheme
+    
+    sys.utl_http.set_header(req, 'Content-Type', 'multipart/form-data; boundary="' || boundary || '"');
+    sys.utl_http.set_header(req, 'Content-Length', log.total_bytes);
+    
+    logger.log('writing message contents...', scope, null, params);
+    
+    write_clob(req, header);
+  
+    sys.dbms_lob.freetemporary(header);
+  
+    if attachment_count > 0 then
+      for i in 1..attachment_count loop
+  
+        write_text(req, p_payload.attachment(i).header);
+  
+        if p_payload.attachment(i).clob_content is not null then
+          write_clob(req, p_payload.attachment(i).clob_content);
+        elsif p_payload.attachment(i).blob_content is not null then
+          write_blob(req, p_payload.attachment(i).blob_content);
+        end if;
+  
+        write_text(req, crlf);
+  
+      end loop;
+    end if;
+  
+    write_text(req, footer);
+  
+    declare
+      my_scheme varchar2(256);
+      my_realm  varchar2(256);
+    begin
+      logger.log('reading response from server...', scope, null, params);
+      resp := sys.utl_http.get_response(req);
+      
+      log_headers(resp);
+  
+      if resp.status_code = sys.utl_http.http_unauthorized then
+        sys.utl_http.get_authentication(resp, my_scheme, my_realm, false);
+        logger.log('Unauthorized: please supply the required ' || my_scheme || ' authentication username/password for realm ' || my_realm || '.', scope, null, params);
+        raise_application_error(-20000, 'unauthorized');
+      elsif resp.status_code = sys.utl_http.http_proxy_auth_required then
+        sys.utl_http.get_authentication(resp, my_scheme, my_realm, true);
+        logger.log('Proxy auth required: please supplied the required ' || my_scheme || ' authentication username/password for realm ' || my_realm || '.', scope, null, params);
+        raise_application_error(-20000, 'proxy auth required');
+      end if;
+      
+      if resp.status_code != '200' then
+        raise_application_error(-20000, 'post failed ' || resp.status_code || ' ' || resp.reason_phrase || ' [' || url || ']');
+      end if;
+      
+      -- expected response will be a json document like this:
+      --{
+      --  "id": "<messageid@domain>",
+      --  "message": "Queued. Thank you."
+      --}
+      resp_text := get_response(resp);
+  
+    exception
+      when others then
+        sys.utl_http.end_response(resp);
+        raise;
+    end;
+
+  end mailgun_post;
 
   procedure log_response is
     -- needs to commit the log entry independently of calling transaction
@@ -773,11 +940,11 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
     log.to_email        := p_payload.to_email;
     log.cc              := p_payload.cc;
     log.bcc             := p_payload.bcc;
-    log.subject         := p_payload.subject;
-    log.message         := SUBSTR(p_payload.message, 1, 4000);
+    log.subject         := subject;
+    log.message         := substr(p_payload.message, 1, 4000);
     log.tag             := p_payload.tag;
-    log.mail_headers    := SUBSTR(p_payload.mail_headers, 1, 4000);
-    log.recipients      := SUBSTR(recipients_to, 1, 4000);
+    log.mail_headers    := substr(p_payload.mail_headers, 1, 4000);
+    log.recipients      := substr(recipients_to, 1, 4000);
 
     begin
       apex_json.parse( resp_text );
@@ -788,7 +955,8 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
       logger.log('msg id: ' || log.mailgun_id, scope, null, params);
     exception
       when others then
-        logger.log_error('error parsing response: ' || SQLERRM, scope, resp_text, params);
+        logger.log_warning('error parsing response: ' || SQLERRM, scope, resp_text, params);
+        log.mailgun_message := substr(resp_text, 1, 4000);
     end;
 
     insert into mailgun_email_log values log;
@@ -800,16 +968,35 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
   end log_response;
 
 begin
+  logger.append_param(params, 'p_payload.requested_ts', p_payload.requested_ts);
+  logger.append_param(params, 'p_payload.from_name', p_payload.from_name);
+  logger.append_param(params, 'p_payload.from_email', p_payload.from_email);
+  logger.append_param(params, 'p_payload.reply_to', p_payload.reply_to);
+  logger.append_param(params, 'p_payload.to_name', p_payload.to_name);
+  logger.append_param(params, 'p_payload.to_email', p_payload.to_email);
+  logger.append_param(params, 'p_payload.cc', p_payload.cc);
+  logger.append_param(params, 'p_payload.bcc', p_payload.bcc);
+  logger.append_param(params, 'p_payload.subject', p_payload.subject);
+  logger.append_param(params, 'p_payload.message', p_payload.message);
+  logger.append_param(params, 'p_payload.tag', p_payload.tag);
+  logger.append_param(params, 'p_payload.mail_headers', p_payload.mail_headers);
   logger.log('START', scope, null, params);
 
   assert(p_payload.from_email is not null, 'send_email: from_email cannot be null');
   
+  prod_check
+    (p_is_prod            => is_prod
+    ,p_non_prod_recipient => non_prod_recipient
+    );
+  
   if p_payload.recipient is not null then
     recipient_count := p_payload.recipient.count;
+    logger.append_param(params, 'recipient_count', recipient_count);
   end if;
 
   if p_payload.attachment is not null then
     attachment_count := p_payload.attachment.count;
+    logger.append_param(params, 'attachment_count', attachment_count);
   end if;
   
   if p_payload.from_email like '% <%>%' then
@@ -817,44 +1004,61 @@ begin
   else
     sender := nvl(p_payload.from_name,p_payload.from_email) || ' <'||p_payload.from_email||'>';
   end if;
+  logger.append_param(params, 'sender', sender);
+  
+  -- construct recipient lists
+  
+  if not is_prod and non_prod_recipient is not null then
+  
+    -- replace all recipients with the non-prod recipient 
+    recipients_to := non_prod_recipient;
+    
+  else
 
-  if p_payload.to_email is not null then
-    assert(recipient_count = 0, 'cannot mix multiple recipients with to_email parameter');
-
-    if p_payload.to_name is not null 
-    and p_payload.to_email not like '% <%>%'
-    and instr(p_payload.to_email, ',') = 0
-    and instr(p_payload.to_email, ';') = 0 then
-      -- to_email is just a single, simple email address, and we have a to_name
-      recipients_to := nvl(p_payload.to_name, p_payload.to_email) || ' <' || p_payload.to_email || '>';
-    else
-      -- to_email is a formatted name+email, or a list, or we don't have any to_name
-      recipients_to := replace(p_payload.to_email, ';', ',');
+    if p_payload.to_email is not null then
+      assert(recipient_count = 0, 'cannot mix multiple recipients with to_email parameter');
+  
+      if p_payload.to_name is not null 
+      and p_payload.to_email not like '% <%>%'
+      and instr(p_payload.to_email, ',') = 0
+      and instr(p_payload.to_email, ';') = 0 then
+        -- to_email is just a single, simple email address, and we have a to_name
+        recipients_to := nvl(p_payload.to_name, p_payload.to_email) || ' <' || p_payload.to_email || '>';
+      else
+        -- to_email is a formatted name+email, or a list, or we don't have any to_name
+        recipients_to := replace(p_payload.to_email, ';', ',');
+      end if;
+  
     end if;
-
+  
+    recipients_cc  := replace(p_payload.cc, ';', ',');
+    recipients_bcc := replace(p_payload.bcc, ';', ',');
+    
+    if recipient_count > 0 then
+      for i in 1..recipient_count loop
+        -- construct the comma-delimited recipient lists
+        case p_payload.recipient(i).send_by
+        when 'to'  then
+          append_recipient(recipients_to, p_payload.recipient(i));          
+        when 'cc'  then
+          append_recipient(recipients_cc, p_payload.recipient(i));
+        when 'bcc' then
+          append_recipient(recipients_bcc, p_payload.recipient(i));
+        end case;
+      end loop;
+    end if;
+  
   end if;
 
-  recipients_cc  := replace(p_payload.cc, ';', ',');
-  recipients_bcc := replace(p_payload.bcc, ';', ',');
-  
-  if recipient_count > 0 then
-    for i in 1..recipient_count loop
-      -- construct the comma-delimited recipient lists
-      case p_payload.recipient(i).send_by
-      when 'to'  then
-        append_recipient(recipients_to, p_payload.recipient(i));          
-      when 'cc'  then
-        append_recipient(recipients_cc, p_payload.recipient(i));
-      when 'bcc' then
-        append_recipient(recipients_bcc, p_payload.recipient(i));
-      end case;
-    end loop;
-  end if;
-  
   assert(recipients_to is not null, 'send_email: recipients list cannot be empty');
   
-  dbms_lob.createtemporary(header, false, dbms_lob.call);
-
+  sys.dbms_lob.createtemporary(header, false, sys.dbms_lob.call);
+  
+  subject := substr(p_payload.subject
+    -- in non-prod environments, append the env name to the subject
+    || case when not is_prod then ' *' || get_global_name || '*' end
+    ,1,4000);
+  
   append_header(crlf
     || form_field('from', sender)
     || form_field('h:Reply-To', p_payload.reply_to)
@@ -862,7 +1066,7 @@ begin
     || form_field('cc', recipients_cc)
     || form_field('bcc', recipients_bcc)
     || form_field('o:tag', p_payload.tag)
-    || form_field('subject', p_payload.subject)
+    || form_field('subject', subject)
     );
     
   if recipient_count > 0 then
@@ -876,7 +1080,7 @@ begin
       apex_json.close_object;
 
       append_header(field_header('recipient-variables'));
-      dbms_lob.append(header, apex_json.get_clob_output);
+      sys.dbms_lob.append(header, apex_json.get_clob_output);
       
       apex_json.free_output;     
     exception
@@ -891,7 +1095,7 @@ begin
   end if;
 
   append_header(field_header('html'));
-  dbms_lob.append(header, p_payload.message);
+  sys.dbms_lob.append(header, p_payload.message);
   append_header(crlf);
 
   footer := '--' || boundary || '--';
@@ -908,7 +1112,7 @@ begin
       if p_payload.attachment(i).clob_content is not null then
         attachment_size := clob_size_bytes(p_payload.attachment(i).clob_content);
       elsif p_payload.attachment(i).blob_content is not null then
-        attachment_size := dbms_lob.getlength(p_payload.attachment(i).blob_content);
+        attachment_size := sys.dbms_lob.getlength(p_payload.attachment(i).blob_content);
       end if;
 
       log.total_bytes := log.total_bytes
@@ -926,74 +1130,18 @@ begin
   
   logger.log('content_length=' || log.total_bytes, scope, null, params);
 
-  -- Turn off checking of status code. We will check it by ourselves.
-  utl_http.set_response_error_check(false);
-
-  set_wallet;
+  if is_prod or non_prod_recipient is not null then
   
-  req := utl_http.begin_request(url, 'POST');
+    -- this is the bit that actually connects to mailgun to send the email
+    mailgun_post;  
   
-  utl_http.set_authentication(req, 'api', setting(setting_private_api_key)); -- Use HTTP Basic Authen. Scheme
+  else
   
-  utl_http.set_header(req, 'Content-Type', 'multipart/form-data; boundary="' || boundary || '"');
-  utl_http.set_header(req, 'Content-Length', log.total_bytes);
+    logger.log_warning('email suppressed', scope, null, params);
   
-  logger.log('writing message contents...', scope, null, params);
+    resp_text := 'email suppressed: ' || get_global_name;
   
-  write_clob(req, header);
-
-  dbms_lob.freetemporary(header);
-
-  if attachment_count > 0 then
-    for i in 1..attachment_count loop
-
-      write_text(req, p_payload.attachment(i).header);
-
-      if p_payload.attachment(i).clob_content is not null then
-        write_clob(req, p_payload.attachment(i).clob_content);
-      elsif p_payload.attachment(i).blob_content is not null then
-        write_blob(req, p_payload.attachment(i).blob_content);
-      end if;
-
-      write_text(req, crlf);
-
-    end loop;
   end if;
-
-  write_text(req, footer);
-
-  begin
-    logger.log('reading response from server...', scope, null, params);
-    resp := utl_http.get_response(req);
-    
-    log_headers(resp);
-
-    if resp.status_code = utl_http.http_unauthorized then
-      utl_http.get_authentication(resp, my_scheme, my_realm, false);
-      logger.log('Unauthorized: please supply the required ' || my_scheme || ' authentication username/password for realm ' || my_realm || '.', scope, null, params);
-      raise_application_error(-20000, 'unauthorized');
-    elsif resp.status_code = utl_http.http_proxy_auth_required then
-      utl_http.get_authentication(resp, my_scheme, my_realm, true);
-      logger.log('Proxy auth required: please supplied the required ' || my_scheme || ' authentication username/password for realm ' || my_realm || '.', scope, null, params);
-      raise_application_error(-20000, 'proxy auth required');
-    end if;
-    
-    if resp.status_code != '200' then
-      raise_application_error(-20000, 'post failed ' || resp.status_code || ' ' || resp.reason_phrase || ' [' || url || ']');
-    end if;
-    
-    -- expected response will be a json document like this:
-    --{
-    --  "id": "<messageid@domain>",
-    --  "message": "Queued. Thank you."
-    --}
-    resp_text := get_response(resp);
-
-  exception
-    when others then
-      utl_http.end_response(resp);
-      raise;
-  end;
 
   log_response;
   
@@ -1003,7 +1151,7 @@ exception
     logger.log_error('Unhandled Exception', scope, null, params);
     begin
       if header is not null then
-        dbms_lob.freetemporary(header);
+        sys.dbms_lob.freetemporary(header);
       end if;
     exception
       when others then
@@ -1164,6 +1312,8 @@ procedure init
   ,p_default_sender_name  in varchar2 := default_no_change
   ,p_default_sender_email in varchar2 := default_no_change
   ,p_queue_expiration     in number := null
+  ,p_prod_instance_name   in varchar2 := default_no_change
+  ,p_non_prod_recipient   in varchar2 := default_no_change
   ) is
   scope logger_logs.scope%type := scope_prefix || 'init';
   params logger.tab_param;
@@ -1177,7 +1327,9 @@ begin
   logger.append_param(params,'p_log_retention_days',p_log_retention_days);
   logger.append_param(params,'p_default_sender_name',p_default_sender_name);
   logger.append_param(params,'p_default_sender_email',p_default_sender_email);
-  logger.append_param(params,'p_queue_expiration',p_queue_expiration);  
+  logger.append_param(params,'p_queue_expiration',p_queue_expiration);
+  logger.append_param(params,'p_prod_instance_name',p_prod_instance_name);
+  logger.append_param(params,'p_non_prod_recipient',p_non_prod_recipient);
   logger.log('START', scope, null, params);
   
   if nvl(p_public_api_key,'*') != default_no_change then
@@ -1220,6 +1372,14 @@ begin
     set_setting(setting_queue_expiration, p_queue_expiration);
   end if;
 
+  if nvl(p_prod_instance_name,'*') != default_no_change then
+    set_setting(setting_prod_instance_name, p_prod_instance_name);
+  end if;
+
+  if nvl(p_non_prod_recipient,'*') != default_no_change then
+    set_setting(setting_non_prod_recipient, p_non_prod_recipient);
+  end if;
+
   logger.log('END', scope, null, params);
 exception
   when others then
@@ -1243,7 +1403,7 @@ begin
   assert(p_address is not null, 'validate_email: p_address cannot be null');
   
   str := get_json
-    (p_url    => api_url || 'address/validate'
+    (p_url    => setting(setting_api_url) || 'address/validate'
     ,p_params => 'address=' || apex_util.url_encode(p_address)
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_public_api_key));
@@ -1306,8 +1466,8 @@ procedure send_email
   ) is
   scope logger_logs.scope%type := scope_prefix || 'send_email';
   params logger.tab_param;
-  enq_opts        dbms_aq.enqueue_options_t;
-  enq_msg_props   dbms_aq.message_properties_t;
+  enq_opts        sys.dbms_aq.enqueue_options_t;
+  enq_msg_props   sys.dbms_aq.message_properties_t;
   payload         t_mailgun_email;
   msgid           raw(16);
   l_from_name     varchar2(200);
@@ -1321,12 +1481,12 @@ begin
   logger.append_param(params,'p_cc',p_cc);
   logger.append_param(params,'p_bcc',p_bcc);
   logger.append_param(params,'p_subject',p_subject);
-  logger.append_param(params,'p_message',dbms_lob.getlength(p_message));
+  logger.append_param(params,'p_message',sys.dbms_lob.getlength(p_message));
   logger.append_param(params,'p_tag',p_tag);
   logger.append_param(params,'p_mail_headers',p_mail_headers);
   logger.append_param(params,'p_priority',p_priority);
   logger.log('START', scope, null, params);
-
+  
   if p_to_email is not null then
     assert(rcpt_count = 0, 'cannot mix multiple recipients with p_to_email parameter');
   else
@@ -1334,18 +1494,12 @@ begin
   end if;
   
   assert(p_priority is not null, 'p_priority cannot be null');
+
+  -- we only use the default sender name if both sender name + email are null
+  l_from_name := nvl(p_from_name, case when p_from_email is null then setting(setting_default_sender_name) end);
+  l_from_email := nvl(p_from_email, setting(setting_default_sender_email));
   
-  l_from_name := p_from_name;
-  l_from_email := p_from_email;
-  
-  -- see if defaults were provided
-  if l_from_email is null then
-    -- this will raise an error - no sender email, can't send email
-    l_from_email := setting(setting_default_sender_email);
-    if l_from_name is null then
-      l_from_name := setting(setting_default_sender_name, l_from_email);
-    end if;
-  end if;
+  assert(l_from_email is not null, 'from_email cannot be null');
   
   val_email_min(l_from_email);
   val_email_min(p_reply_to);
@@ -1372,10 +1526,10 @@ begin
 
   reset;
 
-  enq_msg_props.expiration := setting(setting_queue_expiration, default_queue_expiration);
+  enq_msg_props.expiration := setting(setting_queue_expiration);
   enq_msg_props.priority   := p_priority;
 
-  dbms_aq.enqueue
+  sys.dbms_aq.enqueue
     (queue_name         => queue_name
     ,enqueue_options    => enq_opts
     ,message_properties => enq_msg_props
@@ -1499,7 +1653,7 @@ procedure attach
   scope logger_logs.scope%type := scope_prefix || 'attach';
   params logger.tab_param;
 begin
-  logger.append_param(params,'p_file_content',dbms_lob.getlength(p_file_content));
+  logger.append_param(params,'p_file_content',sys.dbms_lob.getlength(p_file_content));
   logger.append_param(params,'p_file_name',p_file_name);
   logger.append_param(params,'p_content_type',p_content_type);
   logger.append_param(params,'p_inline',p_inline);
@@ -1530,7 +1684,7 @@ procedure attach
   scope logger_logs.scope%type := scope_prefix || 'attach';
   params logger.tab_param;
 begin
-  logger.append_param(params,'p_file_content',dbms_lob.getlength(p_file_content));
+  logger.append_param(params,'p_file_content',sys.dbms_lob.getlength(p_file_content));
   logger.append_param(params,'p_file_name',p_file_name);
   logger.append_param(params,'p_content_type',p_content_type);
   logger.append_param(params,'p_inline',p_inline);
@@ -1565,6 +1719,12 @@ begin
   if g_attachment is not null then
     g_attachment.delete;
   end if;
+  
+  -- we also drop the settings so they are reloaded between calls, in case they
+  -- are changed
+  if g_setting.count > 0 then
+    g_setting.delete;
+  end if;
 
   logger.log('END', scope, null, params);
 exception
@@ -1584,7 +1744,7 @@ begin
   logger.append_param(params,'p_retry_delay',p_retry_delay);
   logger.log('START', scope, null, params);
 
-  dbms_aqadm.create_queue_table
+  sys.dbms_aqadm.create_queue_table
     (queue_table        => queue_table
     ,queue_payload_type => payload_type
     ,sort_list          => 'priority,enq_time'
@@ -1592,14 +1752,14 @@ begin
                         ||',nested table user_data.attachment store as mailgun_attachment_tab'
     );
 
-  dbms_aqadm.create_queue
+  sys.dbms_aqadm.create_queue
     (queue_name  => queue_name
     ,queue_table => queue_table
     ,max_retries => p_max_retries
     ,retry_delay => p_retry_delay
     );
 
-  dbms_aqadm.start_queue (queue_name);
+  sys.dbms_aqadm.start_queue (queue_name);
 
   logger.log('END', scope, null, params);
 exception
@@ -1614,11 +1774,11 @@ procedure drop_queue is
 begin
   logger.log('START', scope, null, params);
 
-  dbms_aqadm.stop_queue (queue_name);
+  sys.dbms_aqadm.stop_queue (queue_name);
   
-  dbms_aqadm.drop_queue (queue_name);
+  sys.dbms_aqadm.drop_queue (queue_name);
   
-  dbms_aqadm.drop_queue_table (queue_table);  
+  sys.dbms_aqadm.drop_queue_table (queue_table);  
 
   logger.log('END', scope, null, params);
 exception
@@ -1630,12 +1790,12 @@ end drop_queue;
 procedure purge_queue (p_msg_state IN VARCHAR2 := default_purge_msg_state) is
   scope logger_logs.scope%type := scope_prefix || 'purge_queue';
   params logger.tab_param;
-  r_opt dbms_aqadm.aq$_purge_options_t;
+  r_opt sys.dbms_aqadm.aq$_purge_options_t;
 begin
   logger.append_param(params,'p_msg_state',p_msg_state);
   logger.log('START', scope, null, params);
 
-  dbms_aqadm.purge_queue_table
+  sys.dbms_aqadm.purge_queue_table
     (queue_table     => queue_table
     ,purge_condition => case when p_msg_state is not null
                         then replace(q'[ qtview.msg_state = '#STATE#' ]'
@@ -1654,8 +1814,8 @@ procedure push_queue
   (p_asynchronous in boolean := false) as
   scope logger_logs.scope%type := scope_prefix || 'push_queue';
   params logger.tab_param;
-  r_dequeue_options    dbms_aq.dequeue_options_t;
-  r_message_properties dbms_aq.message_properties_t;
+  r_dequeue_options    sys.dbms_aq.dequeue_options_t;
+  r_message_properties sys.dbms_aq.message_properties_t;
   msgid                raw(16);
   payload              t_mailgun_email;
   dequeue_count        integer := 0;
@@ -1668,7 +1828,7 @@ begin
   
     -- use dbms_job so that it is only run if/when this session commits
   
-    dbms_job.submit
+    sys.dbms_job.submit
       (job  => job
       ,what => $$PLSQL_UNIT || '.push_queue;'
       );
@@ -1681,13 +1841,13 @@ begin
     logger.log('commit', scope, null, params);
     commit;
     
-    r_dequeue_options.wait := dbms_aq.no_wait;
+    r_dequeue_options.wait := sys.dbms_aq.no_wait;
   
     -- loop through all messages in the queue until there is none
     -- exit this loop when the e_no_queue_data exception is raised.
     loop    
   
-      dbms_aq.dequeue
+      sys.dbms_aq.dequeue
         (queue_name         => queue_name
         ,dequeue_options    => r_dequeue_options
         ,message_properties => r_message_properties
@@ -1733,7 +1893,7 @@ begin
 
   assert(p_repeat_interval is not null, 'create_job: p_repeat_interval cannot be null');
 
-  dbms_scheduler.create_job
+  sys.dbms_scheduler.create_job
     (job_name        => job_name
     ,job_type        => 'stored_procedure'
     ,job_action      => $$PLSQL_UNIT||'.push_queue'
@@ -1741,9 +1901,9 @@ begin
     ,repeat_interval => p_repeat_interval
     );
 
-  dbms_scheduler.set_attribute(job_name,'restartable',true);
+  sys.dbms_scheduler.set_attribute(job_name,'restartable',true);
 
-  dbms_scheduler.enable(job_name);
+  sys.dbms_scheduler.enable(job_name);
 
   logger.log('END', scope, null, params);
 exception
@@ -1759,7 +1919,7 @@ begin
   logger.log('START', scope, null, params);
 
   begin
-    dbms_scheduler.stop_job (job_name);
+    sys.dbms_scheduler.stop_job (job_name);
   exception
     when others then
       if sqlcode != -27366 /*job already stopped*/ then
@@ -1767,7 +1927,7 @@ begin
       end if;
   end;
   
-  dbms_scheduler.drop_job (job_name);
+  sys.dbms_scheduler.drop_job (job_name);
 
   logger.log('END', scope, null, params);
 exception
@@ -1812,7 +1972,7 @@ begin
 
   assert(p_repeat_interval is not null, 'create_purge_job: p_repeat_interval cannot be null');
 
-  dbms_scheduler.create_job
+  sys.dbms_scheduler.create_job
     (job_name        => purge_job_name
     ,job_type        => 'stored_procedure'
     ,job_action      => $$PLSQL_UNIT||'.purge_logs'
@@ -1820,9 +1980,9 @@ begin
     ,repeat_interval => p_repeat_interval
     );
 
-  dbms_scheduler.set_attribute(job_name,'restartable',true);
+  sys.dbms_scheduler.set_attribute(job_name,'restartable',true);
 
-  dbms_scheduler.enable(purge_job_name);
+  sys.dbms_scheduler.enable(purge_job_name);
 
   logger.log('END', scope, null, params);
 exception
@@ -1838,7 +1998,7 @@ begin
   logger.log('START', scope, null, params);
 
   begin
-    dbms_scheduler.stop_job (purge_job_name);
+    sys.dbms_scheduler.stop_job (purge_job_name);
   exception
     when others then
       if sqlcode != -27366 /*job already stopped*/ then
@@ -1846,7 +2006,7 @@ begin
       end if;
   end;
   
-  dbms_scheduler.drop_job (purge_job_name);
+  sys.dbms_scheduler.drop_job (purge_job_name);
 
   logger.log('END', scope, null, params);
 exception
@@ -1911,7 +2071,7 @@ begin
   end if;
 
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/stats/total'
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain) || '/stats/total'
     ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key));
@@ -2015,7 +2175,8 @@ begin
   end if;
 
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/tags/' || apex_util.url_encode(p_tag) || '/stats'
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain)
+              || '/tags/' || apex_util.url_encode(p_tag) || '/stats'
     ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key));
@@ -2102,7 +2263,7 @@ begin
   url_param(prm, 'severity', p_severity);
   
   -- url to get first page of results
-  url := api_url || setting(setting_my_domain) || '/events';
+  url := setting(setting_api_url) || setting(setting_my_domain) || '/events';
   
   loop
   
@@ -2159,7 +2320,7 @@ begin
     url := apex_json.get_varchar2('paging.next');    
     logger.log('next url=' || url, scope, null, params);
     -- convert url to use reverse-apache version, if necessary
-    url := replace(url, default_api_url, api_url);
+    url := replace(url, default_api_url, setting(setting_api_url));
     logger.log('next url[converted]=' || url, scope, null, params);
     exit when url is null;
   end loop;
@@ -2190,7 +2351,7 @@ begin
   url_param(prm, 'limit', p_limit);
   
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/tags'
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain) || '/tags'
     ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key));
@@ -2239,7 +2400,8 @@ begin
   
   str := get_json
     (p_method => 'PUT'
-    ,p_url    => api_url || setting(setting_my_domain) || '/tags/' || apex_util.url_encode(p_tag)
+    ,p_url    => setting(setting_api_url) || setting(setting_my_domain)
+              || '/tags/' || apex_util.url_encode(p_tag)
     ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key));
@@ -2268,7 +2430,8 @@ begin
   
   str := get_json
     (p_method => 'DELETE'
-    ,p_url    => api_url || setting(setting_my_domain) || '/tags/' || apex_util.url_encode(p_tag)
+    ,p_url    => setting(setting_api_url) || setting(setting_my_domain)
+              || '/tags/' || apex_util.url_encode(p_tag)
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key));
   
@@ -2302,7 +2465,7 @@ begin
   url_param(prm, 'limit', p_limit);
   
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/' || p_type
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain) || '/' || p_type
     ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key));
@@ -2347,7 +2510,8 @@ begin
   assert(p_email_address is not null, 'p_email_address cannot be null');
 
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/bounces/' || apex_util.url_encode(p_email_address)
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain)
+              || '/bounces/' || apex_util.url_encode(p_email_address)
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key)
     ,p_method => 'DELETE');
@@ -2381,7 +2545,7 @@ begin
   url_param(prm, 'tag', p_tag);
 
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/unsubscribes'
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain) || '/unsubscribes'
     ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key)
@@ -2413,7 +2577,8 @@ begin
   url_param(prm, 'tag', p_tag);
 
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/unsubscribes/' || apex_util.url_encode(p_email_address)
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain)
+              || '/unsubscribes/' || apex_util.url_encode(p_email_address)
     ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key)
@@ -2440,7 +2605,8 @@ begin
   assert(p_email_address is not null, 'p_email_address cannot be null');
 
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/complaints/' || apex_util.url_encode(p_email_address)
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain)
+              || '/complaints/' || apex_util.url_encode(p_email_address)
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key)
     ,p_method => 'DELETE');
@@ -2454,28 +2620,88 @@ exception
     raise;
 end delete_complaint;
 
-procedure send_test_email is
+procedure send_test_email
+  (p_from_name       in varchar2 := null
+  ,p_from_email      in varchar2 := null
+  ,p_to_name         in varchar2 := null
+  ,p_to_email        in varchar2
+  ,p_subject         in varchar2 := null
+  ,p_message         in varchar2 := null
+  ,p_private_api_key in varchar2 := default_no_change
+  ,p_my_domain       in varchar2 := default_no_change
+  ,p_api_url         in varchar2 := default_no_change
+  ,p_wallet_path     in varchar2 := default_no_change
+  ,p_wallet_password in varchar2 := default_no_change
+  ) is
   scope logger_logs.scope%type := scope_prefix || 'send_test_email';
   params logger.tab_param;
+  payload t_mailgun_email;
 begin
+  logger.append_param(params,'p_from_name',p_from_name);
+  logger.append_param(params,'p_from_email',p_from_email);
+  logger.append_param(params,'p_to_name',p_to_name);
+  logger.append_param(params,'p_to_email',p_to_email);
+  logger.append_param(params,'p_subject',p_subject);
+  logger.append_param(params,'p_message',p_message);
+  logger.append_param(params,'p_private_api_key',case when p_private_api_key is null then 'null' else 'not null' end);
+  logger.append_param(params,'p_my_domain',p_my_domain);
+  logger.append_param(params,'p_api_url',p_api_url);
+  logger.append_param(params,'p_wallet_path',p_wallet_path);
+  logger.append_param(params,'p_wallet_password',case when p_wallet_password is null then 'null' else 'not null' end);
   logger.log('START', scope, null, params);
-
-  send_email
-    (p_from_email => 'Mr Sender <sender@jk64.com>'
-    ,p_to_email   => 'Ms Recipient <recipient@jk64.com>'
-    ,p_subject    => 'test subject ' || to_char(systimestamp,'DD/MM/YYYY HH24:MI:SS.FF')
-    ,p_message    => 'Test Email Body'
-    );
   
-  push_queue;
+  -- set up settings just for this call  
+  load_settings;  
+  if p_private_api_key != default_no_change then
+    g_setting(setting_private_api_key) := p_private_api_key;
+  end if;
+  if p_my_domain != default_no_change then
+    g_setting(setting_my_domain) := p_my_domain;
+  end if;
+  if p_api_url != default_no_change then
+    g_setting(setting_api_url) := p_api_url;
+  end if;
+  if p_wallet_path != default_no_change then
+    g_setting(setting_wallet_path) := p_wallet_path;
+  end if;
+  if p_wallet_password != default_no_change then
+    g_setting(setting_wallet_password) := p_wallet_password;
+  end if;
 
-  logger.log('commit', scope, null, params);
-  commit;
+  payload := t_mailgun_email
+    ( requested_ts => systimestamp
+    , from_name    => nvl(p_from_name, case when p_from_email is null then setting(setting_default_sender_name) end)
+    , from_email   => nvl(p_from_email, setting(setting_default_sender_email))
+    , reply_to     => ''
+    , to_name      => p_to_name
+    , to_email     => p_to_email
+    , cc           => ''
+    , bcc          => ''
+    , subject      => nvl(p_subject
+                         ,'test subject '
+                          || to_char(systimestamp,'DD/MM/YYYY HH24:MI:SS.FF')
+                          || ' ' || get_global_name)
+    , message      => nvl(p_message
+                         ,'This test email was sent from '
+                          || get_global_name
+                          || ' at '
+                          || to_char(systimestamp,'DD/MM/YYYY HH24:MI:SS.FF'))
+    , tag          => ''
+    , mail_headers => ''
+    , recipient    => g_recipient
+    , attachment   => g_attachment
+    );
 
+  send_email(p_payload => payload);
+    
+  -- reset everything back to normal  
+  reset;
+  
   logger.log('END', scope, null, params);
 exception
   when others then
     logger.log_error('Unhandled Exception', scope, null, params);
+    reset;
     raise;
 end send_test_email;
 
