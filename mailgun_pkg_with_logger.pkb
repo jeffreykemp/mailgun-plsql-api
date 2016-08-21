@@ -34,6 +34,9 @@ setting_default_sender_email   constant varchar2(100) := 'default_sender_email';
 setting_queue_expiration       constant varchar2(100) := 'queue_expiration';
 setting_prod_instance_name     constant varchar2(100) := 'prod_instance_name';
 setting_non_prod_recipient     constant varchar2(100) := 'non_prod_recipient';
+setting_required_sender_domain constant varchar2(100) := 'required_sender_domain';
+setting_recipient_whitelist    constant varchar2(100) := 'recipient_whitelist';
+setting_whitelist_action       constant varchar2(100) := 'whitelist_action';
 
 type t_key_val_arr is table of varchar2(4000) index by varchar2(100);
 
@@ -105,15 +108,18 @@ begin
   logger.log('START', scope, null, params);
   
   -- set defaults first
-  g_setting(setting_api_url)              := default_api_url;
-  g_setting(setting_wallet_path)          := '';
-  g_setting(setting_wallet_password)      := '';
-  g_setting(setting_log_retention_days)   := default_log_retention_days;
-  g_setting(setting_default_sender_name)  := '';
-  g_setting(setting_default_sender_email) := '';
-  g_setting(setting_queue_expiration)     := default_queue_expiration;
-  g_setting(setting_prod_instance_name)   := '';
-  g_setting(setting_non_prod_recipient)   := '';
+  g_setting(setting_api_url)                := default_api_url;
+  g_setting(setting_wallet_path)            := '';
+  g_setting(setting_wallet_password)        := '';
+  g_setting(setting_log_retention_days)     := default_log_retention_days;
+  g_setting(setting_default_sender_name)    := '';
+  g_setting(setting_default_sender_email)   := '';
+  g_setting(setting_queue_expiration)       := default_queue_expiration;
+  g_setting(setting_prod_instance_name)     := '';
+  g_setting(setting_non_prod_recipient)     := '';
+  g_setting(setting_required_sender_domain) := '';
+  g_setting(setting_recipient_whitelist)    := '';
+  g_setting(setting_whitelist_action)       := '';
 
   for r in (
     select s.setting_name
@@ -152,7 +158,7 @@ begin
   
   p_value := g_setting(p_name);
 
-  logger.log('END', scope, null, params);
+  logger.log('END ' || case when p_name not in (setting_private_api_key,setting_wallet_password) then p_value end, scope, null, params);
   return p_value;
 exception
   when no_data_found then
@@ -1293,18 +1299,21 @@ end json_members_csv;
 ******************************************************************************/
 
 procedure init
-  (p_public_api_key       in varchar2 := default_no_change
-  ,p_private_api_key      in varchar2 := default_no_change
-  ,p_my_domain            in varchar2 := default_no_change
-  ,p_api_url              in varchar2 := default_no_change
-  ,p_wallet_path          in varchar2 := default_no_change
-  ,p_wallet_password      in varchar2 := default_no_change
-  ,p_log_retention_days   in number := null
-  ,p_default_sender_name  in varchar2 := default_no_change
-  ,p_default_sender_email in varchar2 := default_no_change
-  ,p_queue_expiration     in number := null
-  ,p_prod_instance_name   in varchar2 := default_no_change
-  ,p_non_prod_recipient   in varchar2 := default_no_change
+  (p_public_api_key               in varchar2 := default_no_change
+  ,p_private_api_key              in varchar2 := default_no_change
+  ,p_my_domain                    in varchar2 := default_no_change
+  ,p_api_url                      in varchar2 := default_no_change
+  ,p_wallet_path                  in varchar2 := default_no_change
+  ,p_wallet_password              in varchar2 := default_no_change
+  ,p_log_retention_days           in number := null
+  ,p_default_sender_name          in varchar2 := default_no_change
+  ,p_default_sender_email         in varchar2 := default_no_change
+  ,p_queue_expiration             in number := null
+  ,p_prod_instance_name           in varchar2 := default_no_change
+  ,p_non_prod_recipient           in varchar2 := default_no_change
+  ,p_required_sender_domain       in varchar2 := default_no_change
+  ,p_recipient_whitelist          in varchar2 := default_no_change
+  ,p_whitelist_action             in varchar2 := default_no_change
   ) is
   scope logger_logs.scope%type := scope_prefix || 'init';
   params logger.tab_param;
@@ -1321,6 +1330,9 @@ begin
   logger.append_param(params,'p_queue_expiration',p_queue_expiration);
   logger.append_param(params,'p_prod_instance_name',p_prod_instance_name);
   logger.append_param(params,'p_non_prod_recipient',p_non_prod_recipient);
+  logger.append_param(params,'p_required_sender_domain',p_required_sender_domain);
+  logger.append_param(params,'p_recipient_whitelist',p_recipient_whitelist);
+  logger.append_param(params,'p_whitelist_action',p_whitelist_action);
   logger.log('START', scope, null, params);
   
   if nvl(p_public_api_key,'*') != default_no_change then
@@ -1369,6 +1381,18 @@ begin
 
   if nvl(p_non_prod_recipient,'*') != default_no_change then
     set_setting(setting_non_prod_recipient, p_non_prod_recipient);
+  end if;
+
+  if nvl(p_required_sender_domain,'*') != default_no_change then
+    set_setting(setting_required_sender_domain, p_required_sender_domain);
+  end if;
+
+  if nvl(p_recipient_whitelist,'*') != default_no_change then
+    set_setting(setting_recipient_whitelist, p_recipient_whitelist);
+  end if;
+
+  if nvl(p_whitelist_action,'*') != default_no_change then
+    set_setting(setting_whitelist_action, p_whitelist_action);
   end if;
 
   logger.log('END', scope, null, params);
@@ -1485,10 +1509,23 @@ begin
   end if;
   
   assert(p_priority is not null, 'p_priority cannot be null');
-
+  
   -- we only use the default sender name if both sender name + email are null
   l_from_name := nvl(p_from_name, case when p_from_email is null then setting(setting_default_sender_name) end);
   l_from_email := nvl(p_from_email, setting(setting_default_sender_email));
+
+  -- check if sender is in required sender domain
+  if p_from_email is not null
+  and setting(setting_required_sender_domain) is not null
+  and p_from_email not like '%@' || setting(setting_required_sender_domain) then
+  
+    l_from_email := setting(setting_default_sender_email);        
+
+    if l_from_email is null then
+      raise_application_error(-20000, 'Sender domain not allowed (' || p_from_email || ')');
+    end if;
+
+  end if;
   
   assert(l_from_email is not null, 'from_email cannot be null');
   

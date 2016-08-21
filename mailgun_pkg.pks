@@ -43,18 +43,21 @@ crlf                          constant varchar2(2) := chr(13) || chr(10);
 --   for details refer to:
 --https://github.com/jeffreykemp/mailgun-plsql-api/wiki/API-Reference#procedure-init
 procedure init
-  (p_public_api_key       in varchar2 := default_no_change
-  ,p_private_api_key      in varchar2 := default_no_change
-  ,p_my_domain            in varchar2 := default_no_change
-  ,p_api_url              in varchar2 := default_no_change
-  ,p_wallet_path          in varchar2 := default_no_change
-  ,p_wallet_password      in varchar2 := default_no_change
-  ,p_log_retention_days   in number := null
-  ,p_default_sender_name  in varchar2 := default_no_change
-  ,p_default_sender_email in varchar2 := default_no_change
-  ,p_queue_expiration     in number := null
-  ,p_prod_instance_name   in varchar2 := default_no_change
-  ,p_non_prod_recipient   in varchar2 := default_no_change
+  (p_public_api_key               in varchar2 := default_no_change
+  ,p_private_api_key              in varchar2 := default_no_change
+  ,p_my_domain                    in varchar2 := default_no_change
+  ,p_api_url                      in varchar2 := default_no_change
+  ,p_wallet_path                  in varchar2 := default_no_change
+  ,p_wallet_password              in varchar2 := default_no_change
+  ,p_log_retention_days           in number := null
+  ,p_default_sender_name          in varchar2 := default_no_change
+  ,p_default_sender_email         in varchar2 := default_no_change
+  ,p_queue_expiration             in number := null
+  ,p_prod_instance_name           in varchar2 := default_no_change
+  ,p_non_prod_recipient           in varchar2 := default_no_change
+  ,p_required_sender_domain       in varchar2 := default_no_change
+  ,p_recipient_whitelist          in varchar2 := default_no_change
+  ,p_whitelist_action             in varchar2 := default_no_change
   );
 
 -- validate_email: validate an email address (procedure version)
