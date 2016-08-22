@@ -35,6 +35,10 @@ default_page_size             constant number := 20; --rows to fetch per API cal
 -- mail datetime format
 datetime_format               constant varchar2(100) := 'Dy, dd Mon yyyy hh24:mi:ss tzh:tzm';
 
+-- whitelist actions
+whitelist_suppress            constant varchar2(100) := 'suppress';
+whitelist_raise_exception     constant varchar2(100) := 'raise_exception';
+
 -- copy of utl_tcp.crlf for convenience
 crlf                          constant varchar2(2) := chr(13) || chr(10);
 

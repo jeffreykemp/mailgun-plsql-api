@@ -11,6 +11,7 @@ scope_prefix constant varchar2(31) := lower($$plsql_unit) || '.';
 default_api_url            constant varchar2(4000) := 'https://api.mailgun.net/v3/';
 default_log_retention_days constant number := 30;
 default_queue_expiration   constant integer := 24 * 60 * 60; -- failed emails expire from the queue after 24 hours
+default_whitelist_action   constant varchar2(100) := whitelist_raise_exception;
 
 boundary               constant varchar2(100) := '-----lgryztl0v2vk7fw3njd6cutmxtwysb';
 max_recipients         constant integer := 1000; -- mailgun limitation for recipient variables
@@ -43,6 +44,7 @@ type t_key_val_arr is table of varchar2(4000) index by varchar2(100);
 g_recipient       t_mailgun_recipient_arr;
 g_attachment      t_mailgun_attachment_arr;
 g_setting         t_key_val_arr;
+g_whitelist       apex_application_global.vc_arr2;
 
 e_no_queue_data exception;
 pragma exception_init (e_no_queue_data, -25228);
@@ -119,7 +121,7 @@ begin
   g_setting(setting_non_prod_recipient)     := '';
   g_setting(setting_required_sender_domain) := '';
   g_setting(setting_recipient_whitelist)    := '';
-  g_setting(setting_whitelist_action)       := '';
+  g_setting(setting_whitelist_action)       := default_whitelist_action;
 
   for r in (
     select s.setting_name
@@ -128,8 +130,16 @@ begin
     ) loop
     
     g_setting(r.setting_name) := r.setting_value;
+
+    if r.setting_name not in (setting_private_api_key, setting_wallet_password) then
+      logger.append_param(params,r.setting_name,r.setting_value);
+    end if;
     
   end loop;
+  
+  if g_setting(setting_whitelist_action) is not null then
+    g_whitelist := apex_util.string_to_table(g_setting(setting_recipient_whitelist), ';');
+  end if;
 
   logger.log('END', scope, null, params);
 exception
@@ -1292,6 +1302,130 @@ exception
     raise;
 end json_members_csv;
 
+-- return the name portion of the email address
+function get_mailbox (p_email in varchar2) return varchar2 is
+  scope logger_logs.scope%type := scope_prefix || 'get_mailbox';
+  params logger.tab_param;
+  ret varchar2(255);
+begin
+  logger.append_param(params,'p_email',p_email);
+  logger.log('START', scope, null, params);
+  
+  ret := substr(p_email, 1, instr(p_email, '@') - 1);
+
+  logger.log('END ' || ret, scope, null, params);
+  return ret;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
+end get_mailbox;
+
+-- check one email address against the whitelist, take action if necessary
+function whitelist_check_one (p_email in varchar2) return varchar2 is
+  scope logger_logs.scope%type := scope_prefix || 'whitelist_check_one';
+  params logger.tab_param;
+  i pls_integer;
+  ret varchar2(4000);
+begin
+  logger.append_param(params,'p_email',p_email);
+  logger.log('START', scope, null, params);
+  
+  if p_email is not null and g_whitelist.count > 0 then
+    i := g_whitelist.first;
+    loop
+      exit when i is null;
+    
+      if trim(lower(p_email)) like trim(lower(g_whitelist(i))) then
+        ret := p_email;
+      end if;
+      
+      i := g_whitelist.next(i);
+    end loop;
+    
+    if ret is null then
+      -- match not found: take whitelist action
+      case setting(setting_whitelist_action)
+      when whitelist_suppress then
+        ret := null;
+      when whitelist_raise_exception then
+        raise_application_error(-20000, 'Recipient email address blocked by whitelist (' || p_email || ')');
+      else
+        -- handle %@example.com or exact@example.com
+        ret := replace(setting(setting_whitelist_action), '%', get_mailbox(p_email));
+      end case;
+    end if;
+    
+  else
+    ret := p_email;
+  end if;
+
+  logger.log('END ' || ret, scope, null, params);
+  return ret;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
+end whitelist_check_one;
+
+-- split the email (potentially a list of email addresses, or name<email>)
+-- into each email; check each against the whitelist; reconstruct the new
+-- email list
+function whitelist_check (p_email in varchar2) return varchar2 is
+  scope logger_logs.scope%type := scope_prefix || 'whitelist_check';
+  params logger.tab_param;
+  l_emails apex_application_global.vc_arr2;
+  l_name   varchar2(4000);
+  l_email  varchar2(4000);
+  ret      varchar2(4000);
+begin
+  logger.append_param(params,'p_email',p_email);
+  logger.log('START', scope, null, params);
+  
+  if p_email is not null and g_whitelist.count > 0 then
+  
+    l_emails := apex_util.string_to_table(p_email, ',');
+    if l_emails.count > 0 then
+      for i in 1..l_emails.count loop
+        
+        l_name := '';
+        l_email := trim(l_emails(i));
+        
+        if l_email like '% <%>' then
+          -- split into name + email
+          l_name := substr(l_email, 1, instr(l_email, '<')-1);
+          l_email := trim(substr(l_email, instr(l_email, '<')+1));
+          l_email := trim(rtrim(l_email, '>'));
+        end if;
+        
+        l_email := whitelist_check_one(p_email => l_email);
+        
+        if l_email is not null then
+          if ret is not null then
+            ret := ret || ';';
+          end if;
+          if l_name is not null then
+            ret := ret || l_name || ' <' || l_email || '>';
+          else
+            ret := ret || l_email;
+          end if;
+        end if;
+
+      end loop;
+    end if;
+  
+  else
+    ret := p_email;
+  end if;
+
+  logger.log('END ' || ret, scope, null, params);
+  return ret;
+exception
+  when others then
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
+end whitelist_check;
+
 /******************************************************************************
 **                                                                           **
 **                              PUBLIC METHODS                               **
@@ -1487,6 +1621,9 @@ procedure send_email
   msgid           raw(16);
   l_from_name     varchar2(200);
   l_from_email    varchar2(512);
+  l_to_email      varchar2(4000);
+  l_cc            varchar2(4000);
+  l_bcc           varchar2(4000);
 begin
   logger.append_param(params,'p_from_name',p_from_name);
   logger.append_param(params,'p_from_email',p_from_email);
@@ -1504,8 +1641,6 @@ begin
   
   if p_to_email is not null then
     assert(rcpt_count = 0, 'cannot mix multiple recipients with p_to_email parameter');
-  else
-    assert(rcpt_count > 0, 'must be at least one recipient');
   end if;
   
   assert(p_priority is not null, 'p_priority cannot be null');
@@ -1535,15 +1670,21 @@ begin
   val_email_min(p_cc);
   val_email_min(p_bcc);
   
+  l_to_email := whitelist_check(p_to_email);
+  l_cc := whitelist_check(p_cc);
+  l_bcc := whitelist_check(p_bcc);
+
+  assert(rcpt_count > 0 or coalesce(l_to_email, l_cc, l_bcc) is not null, 'must be at least one recipient');
+  
   payload := t_mailgun_email
     ( requested_ts => systimestamp
     , from_name    => l_from_name
     , from_email   => l_from_email
     , reply_to     => p_reply_to
     , to_name      => p_to_name
-    , to_email     => p_to_email
-    , cc           => p_cc
-    , bcc          => p_bcc
+    , to_email     => l_to_email
+    , cc           => l_cc
+    , bcc          => l_bcc
     , subject      => p_subject
     , message      => p_message
     , tag          => p_tag
@@ -1584,6 +1725,7 @@ procedure send_to
   ) is
   scope logger_logs.scope%type := scope_prefix || 'send_to';
   params logger.tab_param;
+  l_email varchar2(255);
 begin
   logger.append_param(params,'p_email',p_email);
   logger.append_param(params,'p_name',p_name);
@@ -1592,14 +1734,20 @@ begin
   logger.append_param(params,'p_id',p_id);
   logger.append_param(params,'p_send_by',p_send_by);
   logger.log('START', scope, null, params);
+  
+  l_email := whitelist_check(p_email);
+  
+  if l_email is not null then
+  
+    add_recipient
+      (p_email      => l_email
+      ,p_name       => p_name
+      ,p_first_name => p_first_name
+      ,p_last_name  => p_last_name
+      ,p_id         => p_id
+      ,p_send_by    => p_send_by);
 
-  add_recipient
-    (p_email      => p_email
-    ,p_name       => p_name
-    ,p_first_name => p_first_name
-    ,p_last_name  => p_last_name
-    ,p_id         => p_id
-    ,p_send_by    => p_send_by);
+  end if;
 
   logger.log('END', scope, null, params);
 exception
@@ -1617,6 +1765,7 @@ procedure send_cc
   ) is
   scope logger_logs.scope%type := scope_prefix || 'send_cc';
   params logger.tab_param;
+  l_email varchar2(255);
 begin
   logger.append_param(params,'p_email',p_email);
   logger.append_param(params,'p_name',p_name);
@@ -1625,13 +1774,19 @@ begin
   logger.append_param(params,'p_id',p_id);
   logger.log('START', scope, null, params);
 
-  add_recipient
-    (p_email      => p_email
-    ,p_name       => p_name
-    ,p_first_name => p_first_name
-    ,p_last_name  => p_last_name
-    ,p_id         => p_id
-    ,p_send_by    => 'cc');
+  l_email := whitelist_check(p_email);
+  
+  if l_email is not null then
+  
+    add_recipient
+      (p_email      => l_email
+      ,p_name       => p_name
+      ,p_first_name => p_first_name
+      ,p_last_name  => p_last_name
+      ,p_id         => p_id
+      ,p_send_by    => 'cc');
+
+  end if;
 
   logger.log('END', scope, null, params);
 exception
@@ -1649,6 +1804,7 @@ procedure send_bcc
   ) is
   scope logger_logs.scope%type := scope_prefix || 'send_bcc';
   params logger.tab_param;
+  l_email varchar2(255);
 begin
   logger.append_param(params,'p_email',p_email);
   logger.append_param(params,'p_name',p_name);
@@ -1657,13 +1813,19 @@ begin
   logger.append_param(params,'p_id',p_id);
   logger.log('START', scope, null, params);
 
-  add_recipient
-    (p_email      => p_email
-    ,p_name       => p_name
-    ,p_first_name => p_first_name
-    ,p_last_name  => p_last_name
-    ,p_id         => p_id
-    ,p_send_by    => 'bcc');
+  l_email := whitelist_check(p_email);
+  
+  if l_email is not null then
+  
+    add_recipient
+      (p_email      => l_email
+      ,p_name       => p_name
+      ,p_first_name => p_first_name
+      ,p_last_name  => p_last_name
+      ,p_id         => p_id
+      ,p_send_by    => 'bcc');
+
+  end if;
 
   logger.log('END', scope, null, params);
 exception
@@ -1750,9 +1912,8 @@ begin
   
   -- we also drop the settings so they are reloaded between calls, in case they
   -- are changed
-  if g_setting.count > 0 then
-    g_setting.delete;
-  end if;
+  g_setting.delete;  
+  g_whitelist.delete;
 
   logger.log('END', scope, null, params);
 exception
