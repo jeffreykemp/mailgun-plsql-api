@@ -1,5 +1,5 @@
 prompt install.sql
-prompt mailgun v0.6
+prompt mailgun v0.7
 -- run this script in the schema in which you wish the objects to be installed.
 
 @create_tables.sql
@@ -21,6 +21,16 @@ begin mailgun_pkg.create_purge_job; end;
 prompt attempt to recompile any invalid objects
 begin dbms_utility.compile_schema(user,false); end;
 /
+
+prompt update api_version
+merge into mailgun_settings t
+using (select 'api_version' as nm, '0.7' as val from dual) s
+on (t.setting_name = s.nm)
+when matched then update set setting_value = s.val
+when not matched then insert (setting_name, setting_value)
+values (s.nm, s.val);
+
+commit;
 
 set feedback off heading off
 
