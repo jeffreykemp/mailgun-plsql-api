@@ -984,7 +984,7 @@ begin
   logger.append_param(params, 'p_payload.cc', p_payload.cc);
   logger.append_param(params, 'p_payload.bcc', p_payload.bcc);
   logger.append_param(params, 'p_payload.subject', p_payload.subject);
-  logger.append_param(params, 'p_payload.message', p_payload.message);
+  logger.append_param(params, 'p_payload.message', sys.dbms_lob.getlength(p_payload.message));
   logger.append_param(params, 'p_payload.tag', p_payload.tag);
   logger.append_param(params, 'p_payload.mail_headers', p_payload.mail_headers);
   logger.log('START', scope, null, params);
