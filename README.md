@@ -1,4 +1,4 @@
-# mailgun-plsql-api#
+# mailgun-plsql-api #
 
 ## Oracle PL/SQL API for [Mailgun](https://www.mailgun.com) ##
 
