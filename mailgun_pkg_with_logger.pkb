@@ -241,8 +241,8 @@ function enc_chars (clob_content in clob) return clob is
   file_len     pls_integer;
   modulo       pls_integer;
   pieces       pls_integer;
-  amt          binary_integer      := 8000;
-  buf          varchar2(8000);
+  amt          binary_integer      := 2000;
+  buf          varchar2(32767);
   pos          pls_integer         := 1;
   filepos      pls_integer         := 1;
   counter      pls_integer         := 1;
