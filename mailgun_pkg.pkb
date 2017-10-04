@@ -1,5 +1,6 @@
 create or replace package body mailgun_pkg is
-/* mailgun API v0.6
+/* mailgun API v0.7
+  https://github.com/jeffreykemp/mailgun-plsql-api
   by Jeffrey Kemp
 */
 
@@ -7,8 +8,9 @@ create or replace package body mailgun_pkg is
 default_api_url            constant varchar2(4000) := 'https://api.mailgun.net/v3/';
 default_log_retention_days constant number := 30;
 default_queue_expiration   constant integer := 24 * 60 * 60; -- failed emails expire from the queue after 24 hours
+default_whitelist_action   constant varchar2(100) := whitelist_raise_exception;
 
-boundary               constant varchar2(100) := '-----zdkgyl5aalom86symjq9y81s2jtorr';
+boundary               constant varchar2(100) := '-----lgryztl0v2vk7fw3njd6cutmxtwysb';
 max_recipients         constant integer := 1000; -- mailgun limitation for recipient variables
 queue_name             constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue';
 queue_table            constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue_tab';
@@ -28,9 +30,18 @@ setting_log_retention_days     constant varchar2(100) := 'log_retention_days';
 setting_default_sender_name    constant varchar2(100) := 'default_sender_name';
 setting_default_sender_email   constant varchar2(100) := 'default_sender_email';
 setting_queue_expiration       constant varchar2(100) := 'queue_expiration';
+setting_prod_instance_name     constant varchar2(100) := 'prod_instance_name';
+setting_non_prod_recipient     constant varchar2(100) := 'non_prod_recipient';
+setting_required_sender_domain constant varchar2(100) := 'required_sender_domain';
+setting_recipient_whitelist    constant varchar2(100) := 'recipient_whitelist';
+setting_whitelist_action       constant varchar2(100) := 'whitelist_action';
+
+type t_key_val_arr is table of varchar2(4000) index by varchar2(100);
 
 g_recipient       t_mailgun_recipient_arr;
 g_attachment      t_mailgun_attachment_arr;
+g_setting         t_key_val_arr;
+g_whitelist       apex_application_global.vc_arr2;
 
 e_no_queue_data exception;
 pragma exception_init (e_no_queue_data, -25228);
@@ -54,7 +65,7 @@ procedure set_setting
   ,p_value in varchar2
   ) is
 begin
-
+  
   assert(p_name is not null, 'p_name cannot be null');
   
   merge into mailgun_settings t
@@ -69,45 +80,102 @@ begin
     values (s.setting_name, s.setting_value);
   
   commit;
+  
+  -- cause the settings to be reloaded in this session
+  reset;
 
 end set_setting;
+
+-- retrieve all the settings for a normal session
+procedure load_settings is
+begin
+  
+  -- set defaults first
+  g_setting(setting_api_url)                := default_api_url;
+  g_setting(setting_wallet_path)            := '';
+  g_setting(setting_wallet_password)        := '';
+  g_setting(setting_log_retention_days)     := default_log_retention_days;
+  g_setting(setting_default_sender_name)    := '';
+  g_setting(setting_default_sender_email)   := '';
+  g_setting(setting_queue_expiration)       := default_queue_expiration;
+  g_setting(setting_prod_instance_name)     := '';
+  g_setting(setting_non_prod_recipient)     := '';
+  g_setting(setting_required_sender_domain) := '';
+  g_setting(setting_recipient_whitelist)    := '';
+  g_setting(setting_whitelist_action)       := default_whitelist_action;
+
+  for r in (
+    select s.setting_name
+          ,s.setting_value
+    from   mailgun_settings s
+    ) loop
+    
+    g_setting(r.setting_name) := r.setting_value;
+
+  end loop;
+  
+  if g_setting(setting_whitelist_action) is not null then
+    g_whitelist := apex_util.string_to_table(g_setting(setting_recipient_whitelist), ';');
+  end if;
+
+end load_settings;
 
 -- get a setting
 -- if p_default is set, a null/not found will return the default value
 -- if p_default is null, a not found will raise an exception
-function setting
-  (p_name    in varchar2
-  ,p_default in varchar2 := null
-  ) return varchar2 result_cache is
+function setting (p_name in varchar2) return varchar2 is
   p_value mailgun_settings.setting_value%type;
 begin
 
   assert(p_name is not null, 'p_name cannot be null');
   
-  select s.setting_value
-  into   p_value
-  from   mailgun_settings s
-  where  s.setting_name = setting.p_name;
+  -- prime the settings array for this session
+  if g_setting.count = 0 then
+    load_settings;
+  end if;
+  
+  p_value := g_setting(p_name);
 
-  return nvl(p_value, p_default);
+  return p_value;
 exception
   when no_data_found then
-    if p_default is not null then
-      return p_default;
-    else
-      raise_application_error(-20000, 'mailgun setting not set "' || p_name || '" - please setup using ' || $$plsql_unit || '.init()');
-    end if;
+    raise_application_error(-20000, 'mailgun setting not set "' || p_name || '" - please setup using ' || $$plsql_unit || '.init()');
 end setting;
-
-function api_url return varchar2 is
-begin
-  return setting(setting_api_url, p_default => default_api_url);
-end api_url;
 
 function log_retention_days return number is
 begin
-  return to_number(setting(setting_log_retention_days, p_default => default_log_retention_days));
+  return to_number(setting(setting_log_retention_days));
 end log_retention_days;
+
+function get_global_name return varchar2 result_cache is
+  gn global_name.global_name%type;
+begin
+
+  select g.global_name into gn from sys.global_name g;
+
+  return gn;
+end get_global_name;
+
+procedure prod_check
+  (p_is_prod            out boolean
+  ,p_non_prod_recipient out varchar2
+  ) is
+  prod_instance_name mailgun_settings.setting_value%type;
+begin
+  
+  prod_instance_name := setting(setting_prod_instance_name);
+  
+  if prod_instance_name is not null then  
+    p_is_prod := prod_instance_name = get_global_name;
+  else
+    p_is_prod := true; -- if setting not set, we treat this as a prod env
+  end if;
+  
+  if not p_is_prod then
+    p_non_prod_recipient := setting(setting_non_prod_recipient);
+  end if;
+
+end prod_check;
 
 function enc_chars (m in varchar2) return varchar2 is
 begin
@@ -127,21 +195,21 @@ function enc_chars (clob_content in clob) return clob is
 begin
 
   assert(clob_content is not null, 'enc_chars: clob_content cannot be null');
-  dbms_lob.createtemporary(out_clob, false, dbms_lob.call);
-  file_len := dbms_lob.getlength (clob_content);
+  sys.dbms_lob.createtemporary(out_clob, false, sys.dbms_lob.call);
+  file_len := sys.dbms_lob.getlength (clob_content);
   modulo := mod (file_len, amt);
   pieces := trunc (file_len / amt);  
   while (counter <= pieces) loop
-    dbms_lob.read (clob_content, amt, filepos, buf);
+    sys.dbms_lob.read (clob_content, amt, filepos, buf);
     buf := enc_chars(buf);
-    dbms_lob.writeappend(out_clob, length(buf), buf);
+    sys.dbms_lob.writeappend(out_clob, length(buf), buf);
     filepos := counter * amt + 1;
     counter := counter + 1;
   end loop;  
   if (modulo <> 0) then
-    dbms_lob.read (clob_content, modulo, filepos, buf);
+    sys.dbms_lob.read (clob_content, modulo, filepos, buf);
     buf := enc_chars(buf);
-    dbms_lob.writeappend(out_clob, length(buf), buf);
+    sys.dbms_lob.writeappend(out_clob, length(buf), buf);
   end if;
 
   return out_clob;
@@ -154,10 +222,10 @@ function clob_size_bytes (clob_content in clob) return integer is
   chunk_size constant integer := 2000;
 begin
   
-  chunks := ceil(dbms_lob.getlength(clob_content) / chunk_size);
+  chunks := ceil(sys.dbms_lob.getlength(clob_content) / chunk_size);
   
   for i in 1..chunks loop
-    ret := ret + lengthb(dbms_lob.substr(clob_content, amount => chunk_size, offset => (i-1)*chunk_size+1));
+    ret := ret + lengthb(sys.dbms_lob.substr(clob_content, amount => chunk_size, offset => (i-1)*chunk_size+1));
   end loop;
 
   return ret;
@@ -180,38 +248,48 @@ begin
 
 end val_email_min;
 
+procedure log_headers (resp in out nocopy sys.utl_http.resp) is
+  name  varchar2(256);
+  value varchar2(1024);
+begin
+
+  for i in 1..sys.utl_http.get_header_count(resp) loop
+    sys.utl_http.get_header(resp, i, name, value);
+  end loop;
+
+end log_headers;
+
 procedure set_wallet is
   wallet_path     varchar2(4000);
   wallet_password varchar2(4000);
-  default_null    constant varchar2(100) := '*NULL*';
 begin
   
-  wallet_path := setting(setting_wallet_path, p_default => default_null);
-  wallet_password := setting(setting_wallet_password, p_default => default_null);
+  wallet_path := setting(setting_wallet_path);
+  wallet_password := setting(setting_wallet_password);
 
-  if wallet_path != default_null or wallet_password != default_null then
-    utl_http.set_wallet(wallet_path, wallet_password);
+  if wallet_path is not null or wallet_password is not null then
+    sys.utl_http.set_wallet(wallet_path, wallet_password);
   end if;
 
 end set_wallet;
 
-function get_response (resp in out nocopy utl_http.resp) return clob is
+function get_response (resp in out nocopy sys.utl_http.resp) return clob is
   buf varchar2(32767);
   ret clob := empty_clob;
 begin
   
-  dbms_lob.createtemporary(ret, true);
+  sys.dbms_lob.createtemporary(ret, true);
 
   begin
     loop
-      utl_http.read_text(resp, buf, 32767);
-      dbms_lob.writeappend(ret, length(buf), buf);
+      sys.utl_http.read_text(resp, buf, 32767);
+      sys.dbms_lob.writeappend(ret, length(buf), buf);
     end loop;
   exception
-    when utl_http.end_of_body then
+    when sys.utl_http.end_of_body then
       null;
   end;
-  utl_http.end_response(resp);
+  sys.utl_http.end_response(resp);
 
   return ret;
 end get_response;
@@ -224,8 +302,8 @@ function get_json
   ,p_method in varchar2 := 'GET'
   ) return clob is
   url   varchar2(4000) := p_url;
-  req   utl_http.req;
-  resp  utl_http.resp;
+  req   sys.utl_http.req;
+  resp  sys.utl_http.resp;
   ret   clob;
 begin
 
@@ -238,15 +316,17 @@ begin
   
   set_wallet;
 
-  req := utl_http.begin_request(url => url, method => p_method);
+  req := sys.utl_http.begin_request(url => url, method => p_method);
 
   if p_user is not null or p_pwd is not null then
-    utl_http.set_authentication(req, p_user, p_pwd);
+    sys.utl_http.set_authentication(req, p_user, p_pwd);
   end if;
 
-  utl_http.set_header (req,'Accept','application/json');
+  sys.utl_http.set_header (req,'Accept','application/json');
 
-  resp := utl_http.get_response(req);
+  resp := sys.utl_http.get_response(req);
+
+  log_headers(resp);
 
   if resp.status_code != '200' then
     raise_application_error(-20000, 'get_json call failed ' || resp.status_code || ' ' || resp.reason_phrase || ' [' || url || ']');
@@ -428,14 +508,16 @@ begin
 end render_mail_headers;
 
 procedure write_text
-  (req in out nocopy utl_http.req
+  (req in out nocopy sys.utl_http.req
   ,buf in varchar2) is
 begin
-  utl_http.write_text(req, buf);
+
+  sys.utl_http.write_text(req, buf);
+
 end write_text;
 
 procedure write_clob
-  (req          in out nocopy utl_http.req
+  (req          in out nocopy sys.utl_http.req
   ,file_content in clob) is
   file_len     pls_integer;
   modulo       pls_integer;
@@ -448,24 +530,24 @@ procedure write_clob
 begin
 
   assert(file_content is not null, 'write_clob: file_content cannot be null');
-  file_len := dbms_lob.getlength (file_content);
+  file_len := sys.dbms_lob.getlength (file_content);
   modulo := mod (file_len, amt);
   pieces := trunc (file_len / amt);  
   while (counter <= pieces) loop
-    dbms_lob.read (file_content, amt, filepos, buf);
+    sys.dbms_lob.read (file_content, amt, filepos, buf);
     write_text(req, buf);
     filepos := counter * amt + 1;
     counter := counter + 1;
   end loop;  
   if (modulo <> 0) then
-    dbms_lob.read (file_content, modulo, filepos, buf);
+    sys.dbms_lob.read (file_content, modulo, filepos, buf);
     write_text(req, buf);
   end if;
 
 end write_clob;
 
 procedure write_blob
-  (req          in out nocopy utl_http.req
+  (req          in out nocopy sys.utl_http.req
   ,file_content in out nocopy blob) is
   file_len     pls_integer;
   modulo       pls_integer;
@@ -478,39 +560,38 @@ procedure write_blob
 begin
 
   assert(file_content is not null, 'write_blob: file_content cannot be null');
-  file_len := dbms_lob.getlength (file_content);
+  file_len := sys.dbms_lob.getlength (file_content);
   modulo := mod (file_len, amt);
   pieces := trunc (file_len / amt);  
   while (counter <= pieces) loop
-    dbms_lob.read (file_content, amt, filepos, buf);
-    utl_http.write_raw(req, buf);
+    sys.dbms_lob.read (file_content, amt, filepos, buf);
+    sys.utl_http.write_raw(req, buf);
     filepos := counter * amt + 1;
     counter := counter + 1;
   end loop;  
   if (modulo <> 0) then
-    dbms_lob.read (file_content, modulo, filepos, buf);
-    utl_http.write_raw(req, buf);
+    sys.dbms_lob.read (file_content, modulo, filepos, buf);
+    sys.utl_http.write_raw(req, buf);
   end if;
 
 end write_blob;
 
 procedure send_email (p_payload in out nocopy t_mailgun_email) is
-  url              varchar2(32767) := api_url || setting(setting_my_domain) || '/messages';
-  header           clob;
-  sender           varchar2(4000);
-  recipients_to    varchar2(32767);
-  recipients_cc    varchar2(32767);
-  recipients_bcc   varchar2(32767);
-  footer           varchar2(100);
-  req              utl_http.req;
-  resp             utl_http.resp;
-  my_scheme        varchar2(256);
-  my_realm         varchar2(256);
-  attachment_size  integer;
-  resp_text        varchar2(32767);
-  recipient_count  integer := 0;
-  attachment_count integer := 0;
-  log              mailgun_email_log%rowtype;
+  url varchar2(32767) := setting(setting_api_url) || setting(setting_my_domain) || '/messages';
+  header               clob;
+  sender               varchar2(4000);
+  recipients_to        varchar2(32767);
+  recipients_cc        varchar2(32767);
+  recipients_bcc       varchar2(32767);
+  footer               varchar2(100);
+  attachment_size      integer;
+  resp_text            varchar2(32767);
+  recipient_count      integer := 0;
+  attachment_count     integer := 0;
+  subject              varchar2(4000);
+  is_prod              boolean;
+  non_prod_recipient   varchar2(255);
+  log                  mailgun_email_log%rowtype;
 
   procedure append_recipient (rcpt_list in out varchar2, r in t_mailgun_recipient) is
   begin    
@@ -533,8 +614,82 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
   
   procedure append_header (buf in varchar2) is
   begin
-    dbms_lob.writeappend(header, length(buf), buf);
+    sys.dbms_lob.writeappend(header, length(buf), buf);
   end append_header;
+  
+  procedure mailgun_post is
+    req       sys.utl_http.req;
+    resp      sys.utl_http.resp;
+  begin
+
+    -- Turn off checking of status code. We will check it by ourselves.
+    sys.utl_http.set_response_error_check(false);
+  
+    set_wallet;
+    
+    req := sys.utl_http.begin_request(url, 'POST');
+    
+    sys.utl_http.set_authentication(req, 'api', setting(setting_private_api_key)); -- Use HTTP Basic Authen. Scheme
+    
+    sys.utl_http.set_header(req, 'Content-Type', 'multipart/form-data; boundary="' || boundary || '"');
+    sys.utl_http.set_header(req, 'Content-Length', log.total_bytes);
+    
+    write_clob(req, header);
+  
+    sys.dbms_lob.freetemporary(header);
+  
+    if attachment_count > 0 then
+      for i in 1..attachment_count loop
+  
+        write_text(req, p_payload.attachment(i).header);
+  
+        if p_payload.attachment(i).clob_content is not null then
+          write_clob(req, p_payload.attachment(i).clob_content);
+        elsif p_payload.attachment(i).blob_content is not null then
+          write_blob(req, p_payload.attachment(i).blob_content);
+        end if;
+  
+        write_text(req, crlf);
+  
+      end loop;
+    end if;
+  
+    write_text(req, footer);
+  
+    declare
+      my_scheme varchar2(256);
+      my_realm  varchar2(256);
+    begin
+      resp := sys.utl_http.get_response(req);
+      
+      log_headers(resp);
+  
+      if resp.status_code = sys.utl_http.http_unauthorized then
+        sys.utl_http.get_authentication(resp, my_scheme, my_realm, false);
+        raise_application_error(-20000, 'unauthorized');
+      elsif resp.status_code = sys.utl_http.http_proxy_auth_required then
+        sys.utl_http.get_authentication(resp, my_scheme, my_realm, true);
+        raise_application_error(-20000, 'proxy auth required');
+      end if;
+      
+      if resp.status_code != '200' then
+        raise_application_error(-20000, 'post failed ' || resp.status_code || ' ' || resp.reason_phrase || ' [' || url || ']');
+      end if;
+      
+      -- expected response will be a json document like this:
+      --{
+      --  "id": "<messageid@domain>",
+      --  "message": "Queued. Thank you."
+      --}
+      resp_text := get_response(resp);
+  
+    exception
+      when others then
+        sys.utl_http.end_response(resp);
+        raise;
+    end;
+
+  end mailgun_post;
 
   procedure log_response is
     -- needs to commit the log entry independently of calling transaction
@@ -550,16 +705,21 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
     log.to_email        := p_payload.to_email;
     log.cc              := p_payload.cc;
     log.bcc             := p_payload.bcc;
-    log.subject         := p_payload.subject;
-    log.message         := SUBSTR(p_payload.message, 1, 4000);
+    log.subject         := subject;
+    log.message         := substr(p_payload.message, 1, 4000);
     log.tag             := p_payload.tag;
-    log.mail_headers    := SUBSTR(p_payload.mail_headers, 1, 4000);
-    log.recipients      := SUBSTR(recipients_to, 1, 4000);
+    log.mail_headers    := substr(p_payload.mail_headers, 1, 4000);
+    log.recipients      := substr(recipients_to, 1, 4000);
 
-    apex_json.parse( resp_text );
-    log.mailgun_id      := apex_json.get_varchar2('id');
-    log.mailgun_message := apex_json.get_varchar2('message');
-    
+    begin
+      apex_json.parse( resp_text );
+      log.mailgun_id      := apex_json.get_varchar2('id');
+      log.mailgun_message := apex_json.get_varchar2('message');
+    exception
+      when others then
+        log.mailgun_message := substr(resp_text, 1, 4000);
+    end;
+
     insert into mailgun_email_log values log;
 
     commit;
@@ -569,6 +729,11 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
 begin
 
   assert(p_payload.from_email is not null, 'send_email: from_email cannot be null');
+  
+  prod_check
+    (p_is_prod            => is_prod
+    ,p_non_prod_recipient => non_prod_recipient
+    );
   
   if p_payload.recipient is not null then
     recipient_count := p_payload.recipient.count;
@@ -583,44 +748,60 @@ begin
   else
     sender := nvl(p_payload.from_name,p_payload.from_email) || ' <'||p_payload.from_email||'>';
   end if;
+  
+  -- construct recipient lists
+  
+  if not is_prod and non_prod_recipient is not null then
+  
+    -- replace all recipients with the non-prod recipient 
+    recipients_to := non_prod_recipient;
+    
+  else
 
-  if p_payload.to_email is not null then
-    assert(recipient_count = 0, 'cannot mix multiple recipients with to_email parameter');
-
-    if p_payload.to_name is not null 
-    and p_payload.to_email not like '% <%>%'
-    and instr(p_payload.to_email, ',') = 0
-    and instr(p_payload.to_email, ';') = 0 then
-      -- to_email is just a single, simple email address, and we have a to_name
-      recipients_to := nvl(p_payload.to_name, p_payload.to_email) || ' <' || p_payload.to_email || '>';
-    else
-      -- to_email is a formatted name+email, or a list, or we don't have any to_name
-      recipients_to := replace(p_payload.to_email, ';', ',');
+    if p_payload.to_email is not null then
+      assert(recipient_count = 0, 'cannot mix multiple recipients with to_email parameter');
+  
+      if p_payload.to_name is not null 
+      and p_payload.to_email not like '% <%>%'
+      and instr(p_payload.to_email, ',') = 0
+      and instr(p_payload.to_email, ';') = 0 then
+        -- to_email is just a single, simple email address, and we have a to_name
+        recipients_to := nvl(p_payload.to_name, p_payload.to_email) || ' <' || p_payload.to_email || '>';
+      else
+        -- to_email is a formatted name+email, or a list, or we don't have any to_name
+        recipients_to := replace(p_payload.to_email, ';', ',');
+      end if;
+  
     end if;
-
+  
+    recipients_cc  := replace(p_payload.cc, ';', ',');
+    recipients_bcc := replace(p_payload.bcc, ';', ',');
+    
+    if recipient_count > 0 then
+      for i in 1..recipient_count loop
+        -- construct the comma-delimited recipient lists
+        case p_payload.recipient(i).send_by
+        when 'to'  then
+          append_recipient(recipients_to, p_payload.recipient(i));          
+        when 'cc'  then
+          append_recipient(recipients_cc, p_payload.recipient(i));
+        when 'bcc' then
+          append_recipient(recipients_bcc, p_payload.recipient(i));
+        end case;
+      end loop;
+    end if;
+  
   end if;
 
-  recipients_cc  := replace(p_payload.cc, ';', ',');
-  recipients_bcc := replace(p_payload.bcc, ';', ',');
-  
-  if recipient_count > 0 then
-    for i in 1..recipient_count loop
-      -- construct the comma-delimited recipient lists
-      case p_payload.recipient(i).send_by
-      when 'to'  then
-        append_recipient(recipients_to, p_payload.recipient(i));          
-      when 'cc'  then
-        append_recipient(recipients_cc, p_payload.recipient(i));
-      when 'bcc' then
-        append_recipient(recipients_bcc, p_payload.recipient(i));
-      end case;
-    end loop;
-  end if;
-  
   assert(recipients_to is not null, 'send_email: recipients list cannot be empty');
   
-  dbms_lob.createtemporary(header, false, dbms_lob.call);
-
+  sys.dbms_lob.createtemporary(header, false, sys.dbms_lob.call);
+  
+  subject := substr(p_payload.subject
+    -- in non-prod environments, append the env name to the subject
+    || case when not is_prod then ' *' || get_global_name || '*' end
+    ,1,4000);
+  
   append_header(crlf
     || form_field('from', sender)
     || form_field('h:Reply-To', p_payload.reply_to)
@@ -628,7 +809,7 @@ begin
     || form_field('cc', recipients_cc)
     || form_field('bcc', recipients_bcc)
     || form_field('o:tag', p_payload.tag)
-    || form_field('subject', p_payload.subject)
+    || form_field('subject', subject)
     );
     
   if recipient_count > 0 then
@@ -642,7 +823,7 @@ begin
       apex_json.close_object;
 
       append_header(field_header('recipient-variables'));
-      dbms_lob.append(header, apex_json.get_clob_output);
+      sys.dbms_lob.append(header, apex_json.get_clob_output);
       
       apex_json.free_output;     
     exception
@@ -657,7 +838,7 @@ begin
   end if;
 
   append_header(field_header('html'));
-  dbms_lob.append(header, p_payload.message);
+  sys.dbms_lob.append(header, p_payload.message);
   append_header(crlf);
 
   footer := '--' || boundary || '--';
@@ -674,7 +855,7 @@ begin
       if p_payload.attachment(i).clob_content is not null then
         attachment_size := clob_size_bytes(p_payload.attachment(i).clob_content);
       elsif p_payload.attachment(i).blob_content is not null then
-        attachment_size := dbms_lob.getlength(p_payload.attachment(i).blob_content);
+        attachment_size := sys.dbms_lob.getlength(p_payload.attachment(i).blob_content);
       end if;
 
       log.total_bytes := log.total_bytes
@@ -690,67 +871,16 @@ begin
     end loop;
   end if;
   
-  -- Turn off checking of status code. We will check it by ourselves.
-  utl_http.set_response_error_check(false);
-
-  set_wallet;
+  if is_prod or non_prod_recipient is not null then
   
-  req := utl_http.begin_request(url, 'POST');
+    -- this is the bit that actually connects to mailgun to send the email
+    mailgun_post;  
   
-  utl_http.set_authentication(req, 'api', setting(setting_private_api_key)); -- Use HTTP Basic Authen. Scheme
+  else
   
-  utl_http.set_header(req, 'Content-Type', 'multipart/form-data; boundary="' || boundary || '"');
-  utl_http.set_header(req, 'Content-Length', log.total_bytes);
+    resp_text := 'email suppressed: ' || get_global_name;
   
-  write_clob(req, header);
-
-  dbms_lob.freetemporary(header);
-
-  if attachment_count > 0 then
-    for i in 1..attachment_count loop
-
-      write_text(req, p_payload.attachment(i).header);
-
-      if p_payload.attachment(i).clob_content is not null then
-        write_clob(req, p_payload.attachment(i).clob_content);
-      elsif p_payload.attachment(i).blob_content is not null then
-        write_blob(req, p_payload.attachment(i).blob_content);
-      end if;
-
-      write_text(req, crlf);
-
-    end loop;
   end if;
-
-  write_text(req, footer);
-
-  begin
-    resp := utl_http.get_response(req);
-    
-    if resp.status_code = utl_http.http_unauthorized then
-      utl_http.get_authentication(resp, my_scheme, my_realm, false);
-      raise_application_error(-20000, 'unauthorized');
-    elsif resp.status_code = utl_http.http_proxy_auth_required then
-      utl_http.get_authentication(resp, my_scheme, my_realm, true);
-      raise_application_error(-20000, 'proxy auth required');
-    end if;
-    
-    if resp.status_code != '200' then
-      raise_application_error(-20000, 'post failed ' || resp.status_code || ' ' || resp.reason_phrase || ' [' || url || ']');
-    end if;
-    
-    -- expected response will be a json document like this:
-    --{
-    --  "id": "<messageid@domain>",
-    --  "message": "Queued. Thank you."
-    --}
-    resp_text := get_response(resp);
-
-  exception
-    when others then
-      utl_http.end_response(resp);
-      raise;
-  end;
 
   log_response;
   
@@ -758,7 +888,7 @@ exception
   when others then
     begin
       if header is not null then
-        dbms_lob.freetemporary(header);
+        sys.dbms_lob.freetemporary(header);
       end if;
     exception
       when others then
@@ -860,6 +990,103 @@ exception
     return null;
 end json_members_csv;
 
+-- return the name portion of the email address
+function get_mailbox (p_email in varchar2) return varchar2 is
+  ret varchar2(255);
+begin
+  
+  ret := substr(p_email, 1, instr(p_email, '@') - 1);
+
+  return ret;
+end get_mailbox;
+
+-- check one email address against the whitelist, take action if necessary
+function whitelist_check_one (p_email in varchar2) return varchar2 is
+  i pls_integer;
+  ret varchar2(4000);
+begin
+  
+  if p_email is not null and g_whitelist.count > 0 then
+    i := g_whitelist.first;
+    loop
+      exit when i is null;
+    
+      if trim(lower(p_email)) like trim(lower(g_whitelist(i))) then
+        ret := p_email;
+      end if;
+      
+      i := g_whitelist.next(i);
+    end loop;
+    
+    if ret is null then
+      -- match not found: take whitelist action
+      case setting(setting_whitelist_action)
+      when whitelist_suppress then
+        ret := null;
+      when whitelist_raise_exception then
+        raise_application_error(-20000, 'Recipient email address blocked by whitelist (' || p_email || ')');
+      else
+        -- handle %@example.com or exact@example.com
+        ret := replace(setting(setting_whitelist_action), '%', get_mailbox(p_email));
+      end case;
+    end if;
+    
+  else
+    ret := p_email;
+  end if;
+
+  return ret;
+end whitelist_check_one;
+
+-- split the email (potentially a list of email addresses, or name<email>)
+-- into each email; check each against the whitelist; reconstruct the new
+-- email list
+function whitelist_check (p_email in varchar2) return varchar2 is
+  l_emails apex_application_global.vc_arr2;
+  l_name   varchar2(4000);
+  l_email  varchar2(4000);
+  ret      varchar2(4000);
+begin
+  
+  if p_email is not null and g_whitelist.count > 0 then
+  
+    l_emails := apex_util.string_to_table(p_email, ',');
+    if l_emails.count > 0 then
+      for i in 1..l_emails.count loop
+        
+        l_name := '';
+        l_email := trim(l_emails(i));
+        
+        if l_email like '% <%>' then
+          -- split into name + email
+          l_name := substr(l_email, 1, instr(l_email, '<')-1);
+          l_email := trim(substr(l_email, instr(l_email, '<')+1));
+          l_email := trim(rtrim(l_email, '>'));
+        end if;
+        
+        l_email := whitelist_check_one(p_email => l_email);
+        
+        if l_email is not null then
+          if ret is not null then
+            ret := ret || ';';
+          end if;
+          if l_name is not null then
+            ret := ret || l_name || ' <' || l_email || '>';
+          else
+            ret := ret || l_email;
+          end if;
+        end if;
+
+      end loop;
+    end if;
+  
+  else
+    ret := p_email;
+  end if;
+
+  return ret;
+end whitelist_check;
+
 /******************************************************************************
 **                                                                           **
 **                              PUBLIC METHODS                               **
@@ -867,16 +1094,21 @@ end json_members_csv;
 ******************************************************************************/
 
 procedure init
-  (p_public_api_key       in varchar2 := default_no_change
-  ,p_private_api_key      in varchar2 := default_no_change
-  ,p_my_domain            in varchar2 := default_no_change
-  ,p_api_url              in varchar2 := default_no_change
-  ,p_wallet_path          in varchar2 := default_no_change
-  ,p_wallet_password      in varchar2 := default_no_change
-  ,p_log_retention_days   in number := null
-  ,p_default_sender_name  in varchar2 := default_no_change
-  ,p_default_sender_email in varchar2 := default_no_change
-  ,p_queue_expiration     in number := null
+  (p_public_api_key               in varchar2 := default_no_change
+  ,p_private_api_key              in varchar2 := default_no_change
+  ,p_my_domain                    in varchar2 := default_no_change
+  ,p_api_url                      in varchar2 := default_no_change
+  ,p_wallet_path                  in varchar2 := default_no_change
+  ,p_wallet_password              in varchar2 := default_no_change
+  ,p_log_retention_days           in number := null
+  ,p_default_sender_name          in varchar2 := default_no_change
+  ,p_default_sender_email         in varchar2 := default_no_change
+  ,p_queue_expiration             in number := null
+  ,p_prod_instance_name           in varchar2 := default_no_change
+  ,p_non_prod_recipient           in varchar2 := default_no_change
+  ,p_required_sender_domain       in varchar2 := default_no_change
+  ,p_recipient_whitelist          in varchar2 := default_no_change
+  ,p_whitelist_action             in varchar2 := default_no_change
   ) is
 begin
   
@@ -920,6 +1152,26 @@ begin
     set_setting(setting_queue_expiration, p_queue_expiration);
   end if;
 
+  if nvl(p_prod_instance_name,'*') != default_no_change then
+    set_setting(setting_prod_instance_name, p_prod_instance_name);
+  end if;
+
+  if nvl(p_non_prod_recipient,'*') != default_no_change then
+    set_setting(setting_non_prod_recipient, p_non_prod_recipient);
+  end if;
+
+  if nvl(p_required_sender_domain,'*') != default_no_change then
+    set_setting(setting_required_sender_domain, p_required_sender_domain);
+  end if;
+
+  if nvl(p_recipient_whitelist,'*') != default_no_change then
+    set_setting(setting_recipient_whitelist, p_recipient_whitelist);
+  end if;
+
+  if nvl(p_whitelist_action,'*') != default_no_change then
+    set_setting(setting_whitelist_action, p_whitelist_action);
+  end if;
+
 end init;
 
 procedure validate_email
@@ -934,13 +1186,12 @@ begin
   assert(p_address is not null, 'validate_email: p_address cannot be null');
   
   str := get_json
-    (p_url    => api_url || 'address/validate'
+    (p_url    => setting(setting_api_url) || 'address/validate'
     ,p_params => 'address=' || apex_util.url_encode(p_address)
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_public_api_key));
   
   apex_json.parse(str);
-
 
   is_valid_str := apex_json.get_varchar2('is_valid');
   
@@ -977,33 +1228,41 @@ procedure send_email
   ,p_mail_headers in varchar2  := null             -- json structure of tag/value pairs
   ,p_priority     in number    := default_priority -- lower numbers are processed first
   ) is
-  enq_opts        dbms_aq.enqueue_options_t;
-  enq_msg_props   dbms_aq.message_properties_t;
+  enq_opts        sys.dbms_aq.enqueue_options_t;
+  enq_msg_props   sys.dbms_aq.message_properties_t;
   payload         t_mailgun_email;
   msgid           raw(16);
   l_from_name     varchar2(200);
   l_from_email    varchar2(512);
+  l_to_email      varchar2(4000);
+  l_cc            varchar2(4000);
+  l_bcc           varchar2(4000);
 begin
-
+  
   if p_to_email is not null then
     assert(rcpt_count = 0, 'cannot mix multiple recipients with p_to_email parameter');
-  else
-    assert(rcpt_count > 0, 'must be at least one recipient');
   end if;
   
   assert(p_priority is not null, 'p_priority cannot be null');
   
-  l_from_name := p_from_name;
-  l_from_email := p_from_email;
+  -- we only use the default sender name if both sender name + email are null
+  l_from_name := nvl(p_from_name, case when p_from_email is null then setting(setting_default_sender_name) end);
+  l_from_email := nvl(p_from_email, setting(setting_default_sender_email));
+
+  -- check if sender is in required sender domain
+  if p_from_email is not null
+  and setting(setting_required_sender_domain) is not null
+  and p_from_email not like '%@' || setting(setting_required_sender_domain) then
   
-  -- see if defaults were provided
-  if l_from_email is null then
-    -- this will raise an error - no sender email, can't send email
-    l_from_email := setting(setting_default_sender_email);
-    if l_from_name is null then
-      l_from_name := setting(setting_default_sender_name, l_from_email);
+    l_from_email := setting(setting_default_sender_email);        
+
+    if l_from_email is null then
+      raise_application_error(-20000, 'Sender domain not allowed (' || p_from_email || ')');
     end if;
+
   end if;
+  
+  assert(l_from_email is not null, 'from_email cannot be null');
   
   val_email_min(l_from_email);
   val_email_min(p_reply_to);
@@ -1011,15 +1270,21 @@ begin
   val_email_min(p_cc);
   val_email_min(p_bcc);
   
+  l_to_email := whitelist_check(p_to_email);
+  l_cc := whitelist_check(p_cc);
+  l_bcc := whitelist_check(p_bcc);
+
+  assert(rcpt_count > 0 or coalesce(l_to_email, l_cc, l_bcc) is not null, 'must be at least one recipient');
+  
   payload := t_mailgun_email
     ( requested_ts => systimestamp
     , from_name    => l_from_name
     , from_email   => l_from_email
     , reply_to     => p_reply_to
     , to_name      => p_to_name
-    , to_email     => p_to_email
-    , cc           => p_cc
-    , bcc          => p_bcc
+    , to_email     => l_to_email
+    , cc           => l_cc
+    , bcc          => l_bcc
     , subject      => p_subject
     , message      => p_message
     , tag          => p_tag
@@ -1030,10 +1295,10 @@ begin
 
   reset;
 
-  enq_msg_props.expiration := setting(setting_queue_expiration, default_queue_expiration);
+  enq_msg_props.expiration := setting(setting_queue_expiration);
   enq_msg_props.priority   := p_priority;
 
-  dbms_aq.enqueue
+  sys.dbms_aq.enqueue
     (queue_name         => queue_name
     ,enqueue_options    => enq_opts
     ,message_properties => enq_msg_props
@@ -1051,15 +1316,22 @@ procedure send_to
   ,p_id         in varchar2 := null
   ,p_send_by    in varchar2 := 'to'
   ) is
+  l_email varchar2(255);
 begin
+  
+  l_email := whitelist_check(p_email);
+  
+  if l_email is not null then
+  
+    add_recipient
+      (p_email      => l_email
+      ,p_name       => p_name
+      ,p_first_name => p_first_name
+      ,p_last_name  => p_last_name
+      ,p_id         => p_id
+      ,p_send_by    => p_send_by);
 
-  add_recipient
-    (p_email      => p_email
-    ,p_name       => p_name
-    ,p_first_name => p_first_name
-    ,p_last_name  => p_last_name
-    ,p_id         => p_id
-    ,p_send_by    => p_send_by);
+  end if;
 
 end send_to;
 
@@ -1070,15 +1342,22 @@ procedure send_cc
   ,p_last_name  in varchar2 := null
   ,p_id         in varchar2 := null
   ) is
+  l_email varchar2(255);
 begin
 
-  add_recipient
-    (p_email      => p_email
-    ,p_name       => p_name
-    ,p_first_name => p_first_name
-    ,p_last_name  => p_last_name
-    ,p_id         => p_id
-    ,p_send_by    => 'cc');
+  l_email := whitelist_check(p_email);
+  
+  if l_email is not null then
+  
+    add_recipient
+      (p_email      => l_email
+      ,p_name       => p_name
+      ,p_first_name => p_first_name
+      ,p_last_name  => p_last_name
+      ,p_id         => p_id
+      ,p_send_by    => 'cc');
+
+  end if;
 
 end send_cc;
 
@@ -1089,15 +1368,22 @@ procedure send_bcc
   ,p_last_name  in varchar2 := null
   ,p_id         in varchar2 := null
   ) is
+  l_email varchar2(255);
 begin
 
-  add_recipient
-    (p_email      => p_email
-    ,p_name       => p_name
-    ,p_first_name => p_first_name
-    ,p_last_name  => p_last_name
-    ,p_id         => p_id
-    ,p_send_by    => 'bcc');
+  l_email := whitelist_check(p_email);
+  
+  if l_email is not null then
+  
+    add_recipient
+      (p_email      => l_email
+      ,p_name       => p_name
+      ,p_first_name => p_first_name
+      ,p_last_name  => p_last_name
+      ,p_id         => p_id
+      ,p_send_by    => 'bcc');
+
+  end if;
 
 end send_bcc;
 
@@ -1149,6 +1435,11 @@ begin
   if g_attachment is not null then
     g_attachment.delete;
   end if;
+  
+  -- we also drop the settings so they are reloaded between calls, in case they
+  -- are changed
+  g_setting.delete;  
+  g_whitelist.delete;
 
 end reset;
 
@@ -1158,7 +1449,7 @@ procedure create_queue
   ) is
 begin
 
-  dbms_aqadm.create_queue_table
+  sys.dbms_aqadm.create_queue_table
     (queue_table        => queue_table
     ,queue_payload_type => payload_type
     ,sort_list          => 'priority,enq_time'
@@ -1166,33 +1457,33 @@ begin
                         ||',nested table user_data.attachment store as mailgun_attachment_tab'
     );
 
-  dbms_aqadm.create_queue
+  sys.dbms_aqadm.create_queue
     (queue_name  => queue_name
     ,queue_table => queue_table
     ,max_retries => p_max_retries
     ,retry_delay => p_retry_delay
     );
 
-  dbms_aqadm.start_queue (queue_name);
+  sys.dbms_aqadm.start_queue (queue_name);
 
 end create_queue;
 
 procedure drop_queue is
 begin
 
-  dbms_aqadm.stop_queue (queue_name);
+  sys.dbms_aqadm.stop_queue (queue_name);
   
-  dbms_aqadm.drop_queue (queue_name);
+  sys.dbms_aqadm.drop_queue (queue_name);
   
-  dbms_aqadm.drop_queue_table (queue_table);  
+  sys.dbms_aqadm.drop_queue_table (queue_table);  
 
 end drop_queue;
 
 procedure purge_queue (p_msg_state IN VARCHAR2 := default_purge_msg_state) is
-  r_opt dbms_aqadm.aq$_purge_options_t;
+  r_opt sys.dbms_aqadm.aq$_purge_options_t;
 begin
 
-  dbms_aqadm.purge_queue_table
+  sys.dbms_aqadm.purge_queue_table
     (queue_table     => queue_table
     ,purge_condition => case when p_msg_state is not null
                         then replace(q'[ qtview.msg_state = '#STATE#' ]'
@@ -1204,8 +1495,8 @@ end purge_queue;
 
 procedure push_queue
   (p_asynchronous in boolean := false) as
-  r_dequeue_options    dbms_aq.dequeue_options_t;
-  r_message_properties dbms_aq.message_properties_t;
+  r_dequeue_options    sys.dbms_aq.dequeue_options_t;
+  r_message_properties sys.dbms_aq.message_properties_t;
   msgid                raw(16);
   payload              t_mailgun_email;
   dequeue_count        integer := 0;
@@ -1216,7 +1507,7 @@ begin
   
     -- use dbms_job so that it is only run if/when this session commits
   
-    dbms_job.submit
+    sys.dbms_job.submit
       (job  => job
       ,what => $$PLSQL_UNIT || '.push_queue;'
       );
@@ -1226,13 +1517,13 @@ begin
     -- commit any emails requested in the current session
     commit;
     
-    r_dequeue_options.wait := dbms_aq.no_wait;
+    r_dequeue_options.wait := sys.dbms_aq.no_wait;
   
     -- loop through all messages in the queue until there is none
     -- exit this loop when the e_no_queue_data exception is raised.
     loop    
   
-      dbms_aq.dequeue
+      sys.dbms_aq.dequeue
         (queue_name         => queue_name
         ,dequeue_options    => r_dequeue_options
         ,message_properties => r_message_properties
@@ -1266,7 +1557,7 @@ begin
 
   assert(p_repeat_interval is not null, 'create_job: p_repeat_interval cannot be null');
 
-  dbms_scheduler.create_job
+  sys.dbms_scheduler.create_job
     (job_name        => job_name
     ,job_type        => 'stored_procedure'
     ,job_action      => $$PLSQL_UNIT||'.push_queue'
@@ -1274,9 +1565,9 @@ begin
     ,repeat_interval => p_repeat_interval
     );
 
-  dbms_scheduler.set_attribute(job_name,'restartable',true);
+  sys.dbms_scheduler.set_attribute(job_name,'restartable',true);
 
-  dbms_scheduler.enable(job_name);
+  sys.dbms_scheduler.enable(job_name);
 
 end create_job;
 
@@ -1284,7 +1575,7 @@ procedure drop_job is
 begin
 
   begin
-    dbms_scheduler.stop_job (job_name);
+    sys.dbms_scheduler.stop_job (job_name);
   exception
     when others then
       if sqlcode != -27366 /*job already stopped*/ then
@@ -1292,7 +1583,7 @@ begin
       end if;
   end;
   
-  dbms_scheduler.drop_job (job_name);
+  sys.dbms_scheduler.drop_job (job_name);
 
 end drop_job;
 
@@ -1315,7 +1606,7 @@ begin
 
   assert(p_repeat_interval is not null, 'create_purge_job: p_repeat_interval cannot be null');
 
-  dbms_scheduler.create_job
+  sys.dbms_scheduler.create_job
     (job_name        => purge_job_name
     ,job_type        => 'stored_procedure'
     ,job_action      => $$PLSQL_UNIT||'.purge_logs'
@@ -1323,9 +1614,9 @@ begin
     ,repeat_interval => p_repeat_interval
     );
 
-  dbms_scheduler.set_attribute(job_name,'restartable',true);
+  sys.dbms_scheduler.set_attribute(job_name,'restartable',true);
 
-  dbms_scheduler.enable(purge_job_name);
+  sys.dbms_scheduler.enable(purge_job_name);
 
 end create_purge_job;
 
@@ -1333,7 +1624,7 @@ procedure drop_purge_job is
 begin
 
   begin
-    dbms_scheduler.stop_job (purge_job_name);
+    sys.dbms_scheduler.stop_job (purge_job_name);
   exception
     when others then
       if sqlcode != -27366 /*job already stopped*/ then
@@ -1341,7 +1632,7 @@ begin
       end if;
   end;
   
-  dbms_scheduler.drop_job (purge_job_name);
+  sys.dbms_scheduler.drop_job (purge_job_name);
 
 end drop_purge_job;
 
@@ -1393,7 +1684,7 @@ begin
   end if;
 
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/stats/total'
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain) || '/stats/total'
     ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key));
@@ -1480,7 +1771,8 @@ begin
   end if;
 
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/tags/' || apex_util.url_encode(p_tag) || '/stats'
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain)
+              || '/tags/' || apex_util.url_encode(p_tag) || '/stats'
     ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key));
@@ -1547,7 +1839,7 @@ begin
   url_param(prm, 'severity', p_severity);
   
   -- url to get first page of results
-  url := api_url || setting(setting_my_domain) || '/events';
+  url := setting(setting_api_url) || setting(setting_my_domain) || '/events';
   
   loop
   
@@ -1602,7 +1894,7 @@ begin
     prm := null;
     url := apex_json.get_varchar2('paging.next');    
     -- convert url to use reverse-apache version, if necessary
-    url := replace(url, default_api_url, api_url);
+    url := replace(url, default_api_url, setting(setting_api_url));
     exit when url is null;
   end loop;
     
@@ -1621,7 +1913,7 @@ begin
   url_param(prm, 'limit', p_limit);
   
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/tags'
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain) || '/tags'
     ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key));
@@ -1657,7 +1949,8 @@ begin
   
   str := get_json
     (p_method => 'PUT'
-    ,p_url    => api_url || setting(setting_my_domain) || '/tags/' || apex_util.url_encode(p_tag)
+    ,p_url    => setting(setting_api_url) || setting(setting_my_domain)
+              || '/tags/' || apex_util.url_encode(p_tag)
     ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key));
@@ -1677,7 +1970,8 @@ begin
   
   str := get_json
     (p_method => 'DELETE'
-    ,p_url    => api_url || setting(setting_my_domain) || '/tags/' || apex_util.url_encode(p_tag)
+    ,p_url    => setting(setting_api_url) || setting(setting_my_domain)
+              || '/tags/' || apex_util.url_encode(p_tag)
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key));
   
@@ -1701,7 +1995,7 @@ begin
   url_param(prm, 'limit', p_limit);
   
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/' || p_type
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain) || '/' || p_type
     ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key));
@@ -1734,7 +2028,8 @@ begin
   assert(p_email_address is not null, 'p_email_address cannot be null');
 
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/bounces/' || apex_util.url_encode(p_email_address)
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain)
+              || '/bounces/' || apex_util.url_encode(p_email_address)
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key)
     ,p_method => 'DELETE');
@@ -1758,7 +2053,7 @@ begin
   url_param(prm, 'tag', p_tag);
 
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/unsubscribes'
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain) || '/unsubscribes'
     ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key)
@@ -1780,7 +2075,8 @@ begin
   url_param(prm, 'tag', p_tag);
 
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/unsubscribes/' || apex_util.url_encode(p_email_address)
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain)
+              || '/unsubscribes/' || apex_util.url_encode(p_email_address)
     ,p_params => prm
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key)
@@ -1798,7 +2094,8 @@ begin
   assert(p_email_address is not null, 'p_email_address cannot be null');
 
   str := get_json
-    (p_url    => api_url || setting(setting_my_domain) || '/complaints/' || apex_util.url_encode(p_email_address)
+    (p_url    => setting(setting_api_url) || setting(setting_my_domain)
+              || '/complaints/' || apex_util.url_encode(p_email_address)
     ,p_user   => 'api'
     ,p_pwd    => setting(setting_private_api_key)
     ,p_method => 'DELETE');
@@ -1806,6 +2103,75 @@ begin
   -- normally it returns {"message":"Spam complaint has been removed"}
 
 end delete_complaint;
+
+procedure send_test_email
+  (p_from_name       in varchar2 := null
+  ,p_from_email      in varchar2 := null
+  ,p_to_name         in varchar2 := null
+  ,p_to_email        in varchar2
+  ,p_subject         in varchar2 := null
+  ,p_message         in varchar2 := null
+  ,p_private_api_key in varchar2 := default_no_change
+  ,p_my_domain       in varchar2 := default_no_change
+  ,p_api_url         in varchar2 := default_no_change
+  ,p_wallet_path     in varchar2 := default_no_change
+  ,p_wallet_password in varchar2 := default_no_change
+  ) is
+  payload t_mailgun_email;
+begin
+  
+  -- set up settings just for this call  
+  load_settings;  
+  if p_private_api_key != default_no_change then
+    g_setting(setting_private_api_key) := p_private_api_key;
+  end if;
+  if p_my_domain != default_no_change then
+    g_setting(setting_my_domain) := p_my_domain;
+  end if;
+  if p_api_url != default_no_change then
+    g_setting(setting_api_url) := p_api_url;
+  end if;
+  if p_wallet_path != default_no_change then
+    g_setting(setting_wallet_path) := p_wallet_path;
+  end if;
+  if p_wallet_password != default_no_change then
+    g_setting(setting_wallet_password) := p_wallet_password;
+  end if;
+
+  payload := t_mailgun_email
+    ( requested_ts => systimestamp
+    , from_name    => nvl(p_from_name, case when p_from_email is null then setting(setting_default_sender_name) end)
+    , from_email   => nvl(p_from_email, setting(setting_default_sender_email))
+    , reply_to     => ''
+    , to_name      => p_to_name
+    , to_email     => p_to_email
+    , cc           => ''
+    , bcc          => ''
+    , subject      => nvl(p_subject
+                         ,'test subject '
+                          || to_char(systimestamp,'DD/MM/YYYY HH24:MI:SS.FF')
+                          || ' ' || get_global_name)
+    , message      => nvl(p_message
+                         ,'This test email was sent from '
+                          || get_global_name
+                          || ' at '
+                          || to_char(systimestamp,'DD/MM/YYYY HH24:MI:SS.FF'))
+    , tag          => ''
+    , mail_headers => ''
+    , recipient    => g_recipient
+    , attachment   => g_attachment
+    );
+
+  send_email(p_payload => payload);
+    
+  -- reset everything back to normal  
+  reset;
+  
+exception
+  when others then
+    reset;
+    raise;
+end send_test_email;
 
 end mailgun_pkg;
 /
