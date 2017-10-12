@@ -8,10 +8,10 @@
 
 The API provides methods to:
   
-  * **validate an email address** - does the same thing as the [jQuery-based Apex plugin](http://jeffreykemp.github.io/jk64-plugin-mailgunemailvalidator/), except from the server
+  * **validate an email address** - does the same thing as the [jQuery-based APEX plugin](http://jeffreykemp.github.io/jk64-plugin-mailgunemailvalidator/), except from the server
   
   * **send an email**
-    > *NOTE: another alternative (one that also works with Oracle Apex's builtin email system) is to use the mailgun SMTP interface instead.*
+    > *NOTE: another alternative (one that also works with Oracle APEX's builtin email system) is to use the mailgun SMTP interface instead.*
 
   * query your mailgun usage and failure **statistics** and events log
 
@@ -23,4 +23,4 @@ The API provides methods to:
 
 * Installation instructions, detailed API references and example code: **[WIKI](https://github.com/jeffreykemp/mailgun-plsql-api/wiki)**
 
-* Related blog post: <https://jeffkemponoracle.com/2016/04/19/email-made-easier/>
+* Related blog post: <https://jeffkemponoracle.com/2016/04/email-made-easier/>
