@@ -168,6 +168,8 @@ procedure purge_queue (p_msg_state in varchar2 := default_purge_msg_state);
 procedure push_queue
   (p_asynchronous in boolean := false);
 
+procedure re_queue;
+
 -- create a job to periodically call push_queue
 procedure create_job
   (p_repeat_interval in varchar2 := default_repeat_interval);

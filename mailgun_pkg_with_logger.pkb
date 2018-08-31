@@ -17,6 +17,7 @@ boundary               constant varchar2(100) := '-----lgryztl0v2vk7fw3njd6cutmx
 max_recipients         constant integer := 1000; -- mailgun limitation for recipient variables
 queue_name             constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue';
 queue_table            constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue_tab';
+exc_queue_name         constant varchar2(30) := sys_context('userenv','current_schema')||'.aq$_mailgun_queue_tab_e';
 job_name               constant varchar2(30) := 'mailgun_process_queue';
 purge_job_name         constant varchar2(30) := 'mailgun_purge_logs';
 payload_type           constant varchar2(30) := sys_context('userenv','current_schema')||'.t_mailgun_email';
@@ -935,8 +936,11 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
   procedure log_response is
     -- needs to commit the log entry independently of calling transaction
     pragma autonomous_transaction;
+    buf varchar2(32767);
   begin
     logger.log('log_response', scope, null, params);
+    
+    buf := substr(p_payload.message, 1, 4000);
 
     log.sent_ts         := systimestamp;
     log.requested_ts    := p_payload.requested_ts;
@@ -948,7 +952,7 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
     log.cc              := p_payload.cc;
     log.bcc             := p_payload.bcc;
     log.subject         := subject;
-    log.message         := substr(p_payload.message, 1, 4000);
+    log.message         := substrb(buf, 1, 4000);
     log.tag             := p_payload.tag;
     log.mail_headers    := substr(p_payload.mail_headers, 1, 4000);
     log.recipients      := substr(recipients_to, 1, 4000);
@@ -971,7 +975,11 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
 
     logger.log('commit', scope, null, params);
     commit;
-    
+
+  exception
+    when others then
+      logger.log_error('Unhandled Exception', scope, null, params);
+      raise;
   end log_response;
 
 begin
@@ -1150,7 +1158,12 @@ begin
   
   end if;
 
-  log_response;
+  begin
+    log_response;
+  exception
+    when others then
+      logger.log_error('Ignoring Unhandled Exception from log_response', scope, null, params);
+  end;
   
   logger.log('END', scope, null, params);
 exception
@@ -1615,8 +1628,8 @@ procedure send_email
   ) is
   scope logger_logs.scope%type := scope_prefix || 'send_email';
   params logger.tab_param;
-  enq_opts        sys.dbms_aq.enqueue_options_t;
-  enq_msg_props   sys.dbms_aq.message_properties_t;
+  r_enq_opts      sys.dbms_aq.enqueue_options_t;
+  r_enq_msg_props sys.dbms_aq.message_properties_t;
   payload         t_mailgun_email;
   msgid           raw(16);
   l_from_name     varchar2(200);
@@ -1695,13 +1708,13 @@ begin
 
   reset;
 
-  enq_msg_props.expiration := setting(setting_queue_expiration);
-  enq_msg_props.priority   := p_priority;
+  r_enq_msg_props.expiration := setting(setting_queue_expiration);
+  r_enq_msg_props.priority   := p_priority;
 
   sys.dbms_aq.enqueue
     (queue_name         => queue_name
-    ,enqueue_options    => enq_opts
-    ,message_properties => enq_msg_props
+    ,enqueue_options    => r_enq_opts
+    ,message_properties => r_enq_msg_props
     ,payload            => payload
     ,msgid              => msgid
     );
@@ -2071,6 +2084,70 @@ exception
     logger.log_error('Unhandled Exception', scope, null, params);
     raise;
 end push_queue;
+
+procedure re_queue as
+-- for this to work, the exception queue must first be started, e.g.:
+-- exec dbms_aqadm.start_queue('owner.aq$_mailgun_queue_tab_e',false, true);
+  scope logger_logs.scope%type := scope_prefix || 're_queue';
+  params logger.tab_param;
+  r_dequeue_options    sys.dbms_aq.dequeue_options_t;
+  r_message_properties sys.dbms_aq.message_properties_t;
+  r_enq_opts           sys.dbms_aq.enqueue_options_t;
+  r_enq_msg_props      sys.dbms_aq.message_properties_t;
+  msgid                raw(16);
+  payload              t_mailgun_email;
+  dequeue_count        integer := 0;
+  job                  binary_integer;
+begin
+  logger.log('START', scope, null, params);
+
+  r_dequeue_options.wait := sys.dbms_aq.no_wait;
+
+  -- loop through all messages in the queue until there is none
+  -- exit this loop when the e_no_queue_data exception is raised.
+--  loop    
+
+    sys.dbms_aq.dequeue
+      (queue_name         => exc_queue_name
+      ,dequeue_options    => r_dequeue_options
+      ,message_properties => r_message_properties
+      ,payload            => payload
+      ,msgid              => msgid
+      );
+    
+    logger.log('payload priority: ' || r_message_properties.priority
+      || ' enqeued: ' || to_char(r_message_properties.enqueue_time,'dd/mm/yyyy hh24:mi:ss')
+      || ' attempts: ' || r_message_properties.attempts
+      , scope, null, params);
+
+    r_enq_msg_props.expiration := setting(setting_queue_expiration);
+    r_enq_msg_props.priority   := r_message_properties.priority;
+  
+    sys.dbms_aq.enqueue
+      (queue_name         => queue_name
+      ,enqueue_options    => r_enq_opts
+      ,message_properties => r_enq_msg_props
+      ,payload            => payload
+      ,msgid              => msgid
+      );
+
+    logger.log('commit', scope, null, params);
+    commit; -- the queue will treat the message as succeeded
+--    
+--    -- don't bite off everything in one go
+--    dequeue_count := dequeue_count + 1;
+--    exit when dequeue_count >= max_dequeue_count;
+--  end loop;
+
+  logger.log('END', scope, null, params);
+exception
+  when e_no_queue_data then
+    logger.log('END push_queue finished count=' || dequeue_count, scope, null, params);
+  when others then
+    rollback; -- the queue will treat the message as failed
+    logger.log_error('Unhandled Exception', scope, null, params);
+    raise;
+end re_queue;
 
 procedure create_job
   (p_repeat_interval in varchar2 := default_repeat_interval) is
@@ -2896,5 +2973,4 @@ end send_test_email;
 
 end mailgun_pkg;
 /
-
-show errors
+show err
