@@ -1,5 +1,5 @@
 create or replace package body mailgun_pkg is
-/* mailgun API v0.7
+/* mailgun API v0.8 15/9/2018
   https://github.com/jeffreykemp/mailgun-plsql-api
   by Jeffrey Kemp
   Instrumented using Logger https://github.com/OraOpenSource/Logger
@@ -39,6 +39,7 @@ setting_non_prod_recipient     constant varchar2(100) := 'non_prod_recipient';
 setting_required_sender_domain constant varchar2(100) := 'required_sender_domain';
 setting_recipient_whitelist    constant varchar2(100) := 'recipient_whitelist';
 setting_whitelist_action       constant varchar2(100) := 'whitelist_action';
+setting_max_email_size_mb      constant varchar2(100) := 'max_email_size_mb';
 
 type t_key_val_arr is table of varchar2(4000) index by varchar2(100);
 
@@ -46,6 +47,7 @@ g_recipient       t_mailgun_recipient_arr;
 g_attachment      t_mailgun_attachment_arr;
 g_setting         t_key_val_arr;
 g_whitelist       apex_application_global.vc_arr2;
+g_total_bytes     number; -- track total size of email
 
 e_no_queue_data exception;
 pragma exception_init (e_no_queue_data, -25228);
@@ -123,6 +125,7 @@ begin
   g_setting(setting_required_sender_domain) := '';
   g_setting(setting_recipient_whitelist)    := '';
   g_setting(setting_whitelist_action)       := default_whitelist_action;
+  g_setting(setting_max_email_size_mb)      := '';
 
   for r in (
     select s.setting_name
@@ -184,6 +187,11 @@ function log_retention_days return number is
 begin
   return to_number(setting(setting_log_retention_days));
 end log_retention_days;
+
+function max_email_size_bytes return number is
+begin
+  return to_number(setting(setting_max_email_size_mb)) * 1024 * 1024;
+end max_email_size_bytes;
 
 function get_global_name return varchar2 result_cache is
   scope  logger_logs.scope%type := scope_prefix || 'get_global_name';
@@ -598,6 +606,9 @@ procedure add_attachment
   ) is
   scope logger_logs.scope%type := scope_prefix || 'add_attachment';
   params logger.tab_param;
+  header          varchar2(4000);
+  attachment_size number;
+  max_size        number;
 begin
   logger.append_param(params,'p_file_name',p_file_name);
   logger.append_param(params,'p_blob_content',sys.dbms_lob.getlength(p_blob_content));
@@ -605,6 +616,31 @@ begin
   logger.append_param(params,'p_content_type',p_content_type);
   logger.append_param(params,'p_inline',p_inline);
   logger.log('START', scope, null, params);
+  
+  header := attachment_header
+              (p_file_name    => p_file_name
+              ,p_content_type => p_content_type
+              ,p_inline       => p_inline);
+  
+  max_size := max_email_size_bytes;
+  
+  if p_clob_content is not null then
+    attachment_size := clob_size_bytes(p_clob_content);
+  elsif p_blob_content is not null then
+    attachment_size := sys.dbms_lob.getlength(p_blob_content);
+  end if;
+  
+  attachment_size := attachment_size + length(header);
+  
+  if attachment_size > max_size then
+    raise_application_error(-20000, 'attachment too large (' || p_file_name || ' ' || attachment_size || ' bytes; max is ' || max_size || ')');
+  end if;
+  
+  g_total_bytes := g_total_bytes + attachment_size;
+
+  if g_total_bytes > max_size then
+    raise_application_error(-20000, 'total size of all attachments too large (' || g_total_bytes || ' bytes; max is ' || max_size || ')');
+  end if;
 
   if g_attachment is null then
     g_attachment := t_mailgun_attachment_arr();
@@ -614,10 +650,7 @@ begin
     ( file_name     => p_file_name
     , blob_content  => p_blob_content
     , clob_content  => p_clob_content
-    , header        => attachment_header
-        (p_file_name    => p_file_name
-        ,p_content_type => p_content_type
-        ,p_inline       => p_inline)
+    , header        => header
     );
 
   logger.log('END', scope, null, params);
@@ -1461,6 +1494,7 @@ procedure init
   ,p_required_sender_domain       in varchar2 := default_no_change
   ,p_recipient_whitelist          in varchar2 := default_no_change
   ,p_whitelist_action             in varchar2 := default_no_change
+  ,p_max_email_size_mb            in varchar2 := default_no_change
   ) is
   scope logger_logs.scope%type := scope_prefix || 'init';
   params logger.tab_param;
@@ -1480,6 +1514,7 @@ begin
   logger.append_param(params,'p_required_sender_domain',p_required_sender_domain);
   logger.append_param(params,'p_recipient_whitelist',p_recipient_whitelist);
   logger.append_param(params,'p_whitelist_action',p_whitelist_action);
+  logger.append_param(params,'p_max_email_size_mb',p_max_email_size_mb);
   logger.log('START', scope, null, params);
   
   if nvl(p_public_api_key,'*') != default_no_change then
@@ -1540,6 +1575,10 @@ begin
 
   if nvl(p_whitelist_action,'*') != default_no_change then
     set_setting(setting_whitelist_action, p_whitelist_action);
+  end if;
+
+  if nvl(p_max_email_size_mb,'*') != default_no_change then
+    set_setting(setting_max_email_size_mb, p_max_email_size_mb);
   end if;
 
   logger.log('END', scope, null, params);
@@ -1637,6 +1676,7 @@ procedure send_email
   l_to_email      varchar2(4000);
   l_cc            varchar2(4000);
   l_bcc           varchar2(4000);
+  max_size        number;
 begin
   logger.append_param(params,'p_from_name',p_from_name);
   logger.append_param(params,'p_from_email',p_from_email);
@@ -1650,6 +1690,7 @@ begin
   logger.append_param(params,'p_tag',p_tag);
   logger.append_param(params,'p_mail_headers',p_mail_headers);
   logger.append_param(params,'p_priority',p_priority);
+  logger.append_param(params,'g_total_bytes(attachments)',g_total_bytes);
   logger.log('START', scope, null, params);
   
   if p_to_email is not null then
@@ -1688,6 +1729,16 @@ begin
   l_bcc := whitelist_check(p_bcc);
 
   assert(rcpt_count > 0 or coalesce(l_to_email, l_cc, l_bcc) is not null, 'must be at least one recipient');
+
+  max_size := max_email_size_bytes;
+  -- g_total_bytes at this stage is total size of all attachments
+  -- add in the length of the subject, and message, plus a margin for error for other overhead
+  g_total_bytes := g_total_bytes + length(p_subject) + sys.dbms_lob.getlength(p_message) + 1000;
+  logger.append_param(params,'g_total_bytes',g_total_bytes);
+  logger.append_param(params,'max_size',max_size);
+  if g_total_bytes > max_size then
+    raise_application_error(-20000, 'total email too large (est. ' || g_total_bytes || ' bytes; max ' || max_size || ')');
+  end if;
   
   payload := t_mailgun_email
     ( requested_ts => systimestamp
@@ -1927,6 +1978,8 @@ begin
   -- are changed
   g_setting.delete;  
   g_whitelist.delete;
+  
+  g_total_bytes := null;
 
   logger.log('END', scope, null, params);
 exception
@@ -2105,7 +2158,7 @@ begin
 
   -- loop through all messages in the queue until there is none
   -- exit this loop when the e_no_queue_data exception is raised.
---  loop    
+  loop    
 
     sys.dbms_aq.dequeue
       (queue_name         => exc_queue_name
@@ -2133,11 +2186,11 @@ begin
 
     logger.log('commit', scope, null, params);
     commit; -- the queue will treat the message as succeeded
---    
---    -- don't bite off everything in one go
---    dequeue_count := dequeue_count + 1;
---    exit when dequeue_count >= max_dequeue_count;
---  end loop;
+    
+    -- don't bite off everything in one go
+    dequeue_count := dequeue_count + 1;
+    exit when dequeue_count >= max_dequeue_count;
+  end loop;
 
   logger.log('END', scope, null, params);
 exception

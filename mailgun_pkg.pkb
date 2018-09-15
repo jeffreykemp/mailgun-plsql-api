@@ -1,5 +1,5 @@
 create or replace package body mailgun_pkg is
-/* mailgun API v0.7
+/* mailgun API v0.8 15/9/2018
   https://github.com/jeffreykemp/mailgun-plsql-api
   by Jeffrey Kemp
 */
@@ -14,6 +14,7 @@ boundary               constant varchar2(100) := '-----lgryztl0v2vk7fw3njd6cutmx
 max_recipients         constant integer := 1000; -- mailgun limitation for recipient variables
 queue_name             constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue';
 queue_table            constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue_tab';
+exc_queue_name         constant varchar2(30) := sys_context('userenv','current_schema')||'.aq$_mailgun_queue_tab_e';
 job_name               constant varchar2(30) := 'mailgun_process_queue';
 purge_job_name         constant varchar2(30) := 'mailgun_purge_logs';
 payload_type           constant varchar2(30) := sys_context('userenv','current_schema')||'.t_mailgun_email';
@@ -35,6 +36,7 @@ setting_non_prod_recipient     constant varchar2(100) := 'non_prod_recipient';
 setting_required_sender_domain constant varchar2(100) := 'required_sender_domain';
 setting_recipient_whitelist    constant varchar2(100) := 'recipient_whitelist';
 setting_whitelist_action       constant varchar2(100) := 'whitelist_action';
+setting_max_email_size_mb      constant varchar2(100) := 'max_email_size_mb';                                                                             
 
 type t_key_val_arr is table of varchar2(4000) index by varchar2(100);
 
@@ -42,6 +44,7 @@ g_recipient       t_mailgun_recipient_arr;
 g_attachment      t_mailgun_attachment_arr;
 g_setting         t_key_val_arr;
 g_whitelist       apex_application_global.vc_arr2;
+g_total_bytes     number; -- track total size of email                                                      
 
 e_no_queue_data exception;
 pragma exception_init (e_no_queue_data, -25228);
@@ -103,6 +106,7 @@ begin
   g_setting(setting_required_sender_domain) := '';
   g_setting(setting_recipient_whitelist)    := '';
   g_setting(setting_whitelist_action)       := default_whitelist_action;
+  g_setting(setting_max_email_size_mb)      := '';                                                  
 
   for r in (
     select s.setting_name
@@ -146,6 +150,11 @@ function log_retention_days return number is
 begin
   return to_number(setting(setting_log_retention_days));
 end log_retention_days;
+
+function max_email_size_bytes return number is
+begin
+  return to_number(setting(setting_max_email_size_mb)) * 1024 * 1024;
+end max_email_size_bytes;
 
 function get_global_name return varchar2 result_cache is
   gn global_name.global_name%type;
@@ -435,6 +444,30 @@ procedure add_attachment
   ,p_inline       in boolean
   ) is
 begin
+  header := attachment_header
+              (p_file_name    => p_file_name
+              ,p_content_type => p_content_type
+              ,p_inline       => p_inline);
+  
+  max_size := max_email_size_bytes;
+  
+  if p_clob_content is not null then
+    attachment_size := clob_size_bytes(p_clob_content);
+  elsif p_blob_content is not null then
+    attachment_size := sys.dbms_lob.getlength(p_blob_content);
+  end if;
+  
+  attachment_size := attachment_size + length(header);
+  
+  if attachment_size > max_size then
+    raise_application_error(-20000, 'attachment too large (' || p_file_name || ' ' || attachment_size || ' bytes; max is ' || max_size || ')');
+  end if;
+  
+  g_total_bytes := g_total_bytes + attachment_size;
+
+  if g_total_bytes > max_size then
+    raise_application_error(-20000, 'total size of all attachments too large (' || g_total_bytes || ' bytes; max is ' || max_size || ')');
+  end if;
 
   if g_attachment is null then
     g_attachment := t_mailgun_attachment_arr();
@@ -444,10 +477,7 @@ begin
     ( file_name     => p_file_name
     , blob_content  => p_blob_content
     , clob_content  => p_clob_content
-    , header        => attachment_header
-        (p_file_name    => p_file_name
-        ,p_content_type => p_content_type
-        ,p_inline       => p_inline)
+    , header        => header
     );
 
 end add_attachment;
@@ -694,7 +724,9 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
   procedure log_response is
     -- needs to commit the log entry independently of calling transaction
     pragma autonomous_transaction;
+    buf varchar2(32767);                    
   begin
+    buf := substr(p_payload.message, 1, 4000);                                          
 
     log.sent_ts         := systimestamp;
     log.requested_ts    := p_payload.requested_ts;
@@ -706,7 +738,7 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
     log.cc              := p_payload.cc;
     log.bcc             := p_payload.bcc;
     log.subject         := subject;
-    log.message         := substr(p_payload.message, 1, 4000);
+    log.message         := substr(buf, 1, 4000);
     log.tag             := p_payload.tag;
     log.mail_headers    := substr(p_payload.mail_headers, 1, 4000);
     log.recipients      := substr(recipients_to, 1, 4000);
@@ -1109,6 +1141,7 @@ procedure init
   ,p_required_sender_domain       in varchar2 := default_no_change
   ,p_recipient_whitelist          in varchar2 := default_no_change
   ,p_whitelist_action             in varchar2 := default_no_change
+  ,p_max_email_size_mb            in varchar2 := default_no_change                                                                  
   ) is
 begin
   
@@ -1172,6 +1205,10 @@ begin
     set_setting(setting_whitelist_action, p_whitelist_action);
   end if;
 
+  if nvl(p_max_email_size_mb,'*') != default_no_change then
+    set_setting(setting_max_email_size_mb, p_max_email_size_mb);
+  end if;
+
 end init;
 
 procedure validate_email
@@ -1228,8 +1265,8 @@ procedure send_email
   ,p_mail_headers in varchar2  := null             -- json structure of tag/value pairs
   ,p_priority     in number    := default_priority -- lower numbers are processed first
   ) is
-  enq_opts        sys.dbms_aq.enqueue_options_t;
-  enq_msg_props   sys.dbms_aq.message_properties_t;
+  r_enq_opts      sys.dbms_aq.enqueue_options_t;
+  r_enq_msg_props sys.dbms_aq.message_properties_t;
   payload         t_mailgun_email;
   msgid           raw(16);
   l_from_name     varchar2(200);
@@ -1237,6 +1274,7 @@ procedure send_email
   l_to_email      varchar2(4000);
   l_cc            varchar2(4000);
   l_bcc           varchar2(4000);
+  max_size        number;                         
 begin
   
   if p_to_email is not null then
@@ -1275,6 +1313,14 @@ begin
   l_bcc := whitelist_check(p_bcc);
 
   assert(rcpt_count > 0 or coalesce(l_to_email, l_cc, l_bcc) is not null, 'must be at least one recipient');
+
+  max_size := max_email_size_bytes;
+  -- g_total_bytes at this stage is total size of all attachments
+  -- add in the length of the subject, and message, plus a margin for error for other overhead
+  g_total_bytes := g_total_bytes + length(p_subject) + sys.dbms_lob.getlength(p_message) + 1000;
+  if g_total_bytes > max_size then
+    raise_application_error(-20000, 'total email too large (est. ' || g_total_bytes || ' bytes; max ' || max_size || ')');
+  end if;
   
   payload := t_mailgun_email
     ( requested_ts => systimestamp
@@ -1295,13 +1341,13 @@ begin
 
   reset;
 
-  enq_msg_props.expiration := setting(setting_queue_expiration);
-  enq_msg_props.priority   := p_priority;
+  r_enq_msg_props.expiration := setting(setting_queue_expiration);
+  r_enq_msg_props.priority   := p_priority;
 
   sys.dbms_aq.enqueue
     (queue_name         => queue_name
-    ,enqueue_options    => enq_opts
-    ,message_properties => enq_msg_props
+    ,enqueue_options    => r_enq_opts
+    ,message_properties => r_enq_msg_props
     ,payload            => payload
     ,msgid              => msgid
     );
@@ -1440,6 +1486,8 @@ begin
   -- are changed
   g_setting.delete;  
   g_whitelist.delete;
+  
+  g_total_bytes := null;
 
 end reset;
 
@@ -1550,6 +1598,60 @@ exception
     rollback; -- the queue will treat the message as failed
     raise;
 end push_queue;
+
+procedure re_queue as
+-- for this to work, the exception queue must first be started, e.g.:
+-- exec dbms_aqadm.start_queue('owner.aq$_mailgun_queue_tab_e',false, true);
+  r_dequeue_options    sys.dbms_aq.dequeue_options_t;
+  r_message_properties sys.dbms_aq.message_properties_t;
+  r_enq_opts           sys.dbms_aq.enqueue_options_t;
+  r_enq_msg_props      sys.dbms_aq.message_properties_t;
+  msgid                raw(16);
+  payload              t_mailgun_email;
+  dequeue_count        integer := 0;
+  job                  binary_integer;
+begin
+
+  r_dequeue_options.wait := sys.dbms_aq.no_wait;
+
+  -- loop through all messages in the queue until there is none
+  -- exit this loop when the e_no_queue_data exception is raised.
+  loop    
+
+    sys.dbms_aq.dequeue
+      (queue_name         => exc_queue_name
+      ,dequeue_options    => r_dequeue_options
+      ,message_properties => r_message_properties
+      ,payload            => payload
+      ,msgid              => msgid
+      );
+    
+    r_enq_msg_props.expiration := setting(setting_queue_expiration);
+    r_enq_msg_props.priority   := r_message_properties.priority;
+  
+    sys.dbms_aq.enqueue
+      (queue_name         => queue_name
+      ,enqueue_options    => r_enq_opts
+      ,message_properties => r_enq_msg_props
+      ,payload            => payload
+      ,msgid              => msgid
+      );
+
+    logger.log('commit', scope, null, params);
+    commit; -- the queue will treat the message as succeeded
+    
+    -- don't bite off everything in one go
+    dequeue_count := dequeue_count + 1;
+    exit when dequeue_count >= max_dequeue_count;
+  end loop;
+
+exception
+  when e_no_queue_data then
+    null;
+  when others then
+    rollback; -- the queue will treat the message as failed
+    raise;
+end re_queue;
 
 procedure create_job
   (p_repeat_interval in varchar2 := default_repeat_interval) is
@@ -2176,4 +2278,4 @@ end send_test_email;
 end mailgun_pkg;
 /
 
-show errors
+show err

@@ -1,5 +1,5 @@
 create or replace package mailgun_pkg is
-/* mailgun API v0.7
+/* mailgun API v0.8 15/9/2018
   https://github.com/jeffreykemp/mailgun-plsql-api
   by Jeffrey Kemp
 */
@@ -62,6 +62,7 @@ procedure init
   ,p_required_sender_domain       in varchar2 := default_no_change
   ,p_recipient_whitelist          in varchar2 := default_no_change
   ,p_whitelist_action             in varchar2 := default_no_change
+  ,p_max_email_size_mb            in varchar2 := default_no_change
   );
 
 -- validate_email: validate an email address (procedure version)

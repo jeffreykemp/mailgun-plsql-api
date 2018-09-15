@@ -1,5 +1,5 @@
 prompt install.sql
-prompt mailgun v0.7
+prompt mailgun v0.8 15/9/2018
 -- run this script in the schema in which you wish the objects to be installed.
 
 @create_tables.sql
@@ -24,7 +24,7 @@ begin dbms_utility.compile_schema(user,false); end;
 
 prompt update api_version
 merge into mailgun_settings t
-using (select 'api_version' as nm, '0.7' as val from dual) s
+using (select 'api_version' as nm, '0.8' as val from dual) s
 on (t.setting_name = s.nm)
 when matched then update set setting_value = s.val
 when not matched then insert (setting_name, setting_value)
@@ -32,7 +32,7 @@ values (s.nm, s.val);
 
 commit;
 
-begin logger.log_permanent('Mailgun PL/SQL API installed v0.7', 'mailgun'); end;
+begin logger.log_permanent('Mailgun PL/SQL API installed v0.8 15/9/2018', 'mailgun'); end;
 /
 
 set feedback off heading off
