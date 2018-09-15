@@ -1,5 +1,5 @@
 create or replace package mailgun_pkg is
-/* mailgun API v0.8 15/9/2018
+/* mailgun API v1.1 15/9/2018
   https://github.com/jeffreykemp/mailgun-plsql-api
   by Jeffrey Kemp
 */
