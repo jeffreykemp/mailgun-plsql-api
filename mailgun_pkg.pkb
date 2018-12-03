@@ -443,6 +443,9 @@ procedure add_attachment
   ,p_content_type in varchar2
   ,p_inline       in boolean
   ) is
+  header          varchar2(4000);
+  attachment_size number;
+  max_size        number;
 begin
   header := attachment_header
               (p_file_name    => p_file_name
@@ -1637,7 +1640,6 @@ begin
       ,msgid              => msgid
       );
 
-    logger.log('commit', scope, null, params);
     commit; -- the queue will treat the message as succeeded
     
     -- don't bite off everything in one go
