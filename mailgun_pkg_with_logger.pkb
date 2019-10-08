@@ -1,5 +1,5 @@
 create or replace package body mailgun_pkg is
-/* mailgun API v1.1 15/9/2018
+/* mailgun API v1.2 08/10/2019
   https://github.com/jeffreykemp/mailgun-plsql-api
   by Jeffrey Kemp
   Instrumented using Logger https://github.com/OraOpenSource/Logger
@@ -13,15 +13,15 @@ default_log_retention_days constant number := 30;
 default_queue_expiration   constant integer := 24 * 60 * 60; -- failed emails expire from the queue after 24 hours
 default_whitelist_action   constant varchar2(100) := whitelist_raise_exception;
 
-boundary               constant varchar2(100) := '-----lgryztl0v2vk7fw3njd6cutmxtwysb';
-max_recipients         constant integer := 1000; -- mailgun limitation for recipient variables
-queue_name             constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue';
-queue_table            constant varchar2(30) := sys_context('userenv','current_schema')||'.mailgun_queue_tab';
-exc_queue_name         constant varchar2(30) := sys_context('userenv','current_schema')||'.aq$_mailgun_queue_tab_e';
-job_name               constant varchar2(30) := 'mailgun_process_queue';
-purge_job_name         constant varchar2(30) := 'mailgun_purge_logs';
-payload_type           constant varchar2(30) := sys_context('userenv','current_schema')||'.t_mailgun_email';
-max_dequeue_count      constant integer := 1000; -- max emails processed by push_queue in one go
+boundary               constant varchar2(100) := '-----oqyzabwvqpfwyjivmsloxbmmpnoyqqng';
+max_recipients         constant integer       := 1000; -- mailgun limitation for recipient variables
+queue_name             constant varchar2(100) := sys_context('userenv','current_schema')||'.mailgun_queue';
+queue_table            constant varchar2(100) := sys_context('userenv','current_schema')||'.mailgun_queue_tab';
+exc_queue_name         constant varchar2(100) := sys_context('userenv','current_schema')||'.aq$_mailgun_queue_tab_e';
+job_name               constant varchar2(30)  := 'mailgun_process_queue';
+purge_job_name         constant varchar2(30)  := 'mailgun_purge_logs';
+payload_type           constant varchar2(100) := sys_context('userenv','current_schema')||'.t_mailgun_email';
+max_dequeue_count      constant integer       := 1000; -- max emails processed by push_queue in one go
 
 -- mailgun setting names
 setting_public_api_key         constant varchar2(100) := 'public_api_key';
@@ -252,7 +252,6 @@ function enc_chars (clob_content in clob) return clob is
   pieces       pls_integer;
   amt          binary_integer      := 2000;
   buf          varchar2(32767);
-  pos          pls_integer         := 1;
   filepos      pls_integer         := 1;
   counter      pls_integer         := 1;
   out_clob     clob;
@@ -406,6 +405,7 @@ begin
 exception
   when others then
     logger.log_error('Unhandled Exception', scope, null, params);
+    utl_http.end_response(resp);
     raise;
 end get_response;
 
