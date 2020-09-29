@@ -1,5 +1,5 @@
 create or replace package body mailgun_pkg is
-/* mailgun API v1.2 08/10/2019
+/* mailgun API v1.3 29/09/2020
   https://github.com/jeffreykemp/mailgun-plsql-api
   by Jeffrey Kemp
   Instrumented using Logger https://github.com/OraOpenSource/Logger
@@ -852,6 +852,7 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
   recipients_to        varchar2(32767);
   recipients_cc        varchar2(32767);
   recipients_bcc       varchar2(32767);
+  recipients_json      varchar2(32767);
   footer               varchar2(100);
   attachment_size      integer;
   resp_text            varchar2(32767);
@@ -870,21 +871,19 @@ procedure send_email (p_payload in out nocopy t_mailgun_email) is
     rcpt_list := rcpt_list || r.email_spec;
   end append_recipient;
   
-  procedure add_recipient_variable (r in t_mailgun_recipient) is
-  begin    
-    apex_json.open_object(r.email);
-    apex_json.write('email',      r.email);
-    apex_json.write('name',       r.name);
-    apex_json.write('first_name', r.first_name);
-    apex_json.write('last_name',  r.last_name);
-    apex_json.write('id',         r.id);
-    apex_json.close_object;
-  end add_recipient_variable;
-  
   procedure append_header (buf in varchar2) is
   begin
     sys.dbms_lob.writeappend(header, length(buf), buf);
   end append_header;
+  
+  function json_tag_value(tag in varchar2, val in varchar2) return varchar2 is
+  begin
+    if val is not null then
+      return '"' || tag || '":"' || val || '",';
+    else
+      return null;
+    end if;
+  end json_tag_value;
   
   procedure mailgun_post is
     req       sys.utl_http.req;
@@ -1118,24 +1117,21 @@ begin
     );
     
   if recipient_count > 0 then
-    begin
-      -- construct the recipient variables json object
-      apex_json.initialize_clob_output;
-      apex_json.open_object;  
-      for i in 1..recipient_count loop
-        add_recipient_variable(p_payload.recipient(i));
-      end loop;      
-      apex_json.close_object;
-
-      append_header(field_header('recipient-variables'));
-      sys.dbms_lob.append(header, apex_json.get_clob_output);
-      
-      apex_json.free_output;     
-    exception
-      when others then
-        apex_json.free_output;
-        raise;
-    end;
+    -- construct the recipient variables json object      
+    for i in 1..recipient_count loop
+      recipients_json := recipients_json
+        || case when i>1 then ',' end
+        || '"' || p_payload.recipient(i).email || '":{'
+        || rtrim(
+             json_tag_value('email', p_payload.recipient(i).email)
+          || json_tag_value('name', p_payload.recipient(i).name)
+          || json_tag_value('first_name', p_payload.recipient(i).first_name)
+          || json_tag_value('last_name', p_payload.recipient(i).last_name)
+          || json_tag_value('id', p_payload.recipient(i).id)
+             ,',')
+        || '}';
+    end loop;
+    append_header(form_field('recipient-variables', '{' || recipients_json || '}'));
   end if;
 
   if p_payload.mail_headers is not null then
